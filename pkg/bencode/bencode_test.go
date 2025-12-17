@@ -120,15 +120,51 @@ func TestBencode_Decode(t *testing.T) {
 			wantErr: ErrInvalidIntegerFormat,
 		},
 		{
-			name:    "int",
+			name:    "list: strings and ints",
+			input:   "l5:hello5:worldi123e3:abce",
+			wantVal: []interface{}{"hello", "world", 123, "abc"},
+		},
+		{
+			name:    "list: strings and ints",
+			input:   "l5:helloi52ee",
+			wantVal: []interface{}{"hello", 52},
+		},
+
+		{
+			name:    "list: ints",
 			input:   "li32ei25ee",
 			wantVal: []interface{}{32, 25},
 		},
 		{
-			name:  "dictionary",
+			name:    "dictionary: empty",
+			input:   "de",
+			wantVal: map[string]interface{}{},
+		},
+		{
+			name:  "dictionary: with dictionary",
 			input: "d4:infod4:name5:b.txt6:lengthi1ee",
 			wantVal: map[string]interface{}{
 				"info": map[string]interface{}{"name": "b.txt", "length": 1},
+			},
+		},
+		{
+			name:  "dictionary: torrent example",
+			input: "d8:announce23:http://bt4.t-ru.org/ann13:announce-listll23:http://bt4.t-ru.org/annel31:http://retracker.local/announceee7:comment51:https://rutracker.org/forum/viewtopic.php?t=649613210:created by13:BitComet/2.0513:creation datei1709731450e8:encoding5:UTF-84:infod6:lengthi20028000e4:name52:Atkins Evan - GoLang for Machine Learning - 2024.PDF10:name.utf-852:Atkins Evan - GoLang for Machine Learning - 2024.PDF12:piece lengthi65536ee9:publisher13:rutracker.org13:publisher-url51:https://rutracker.org/forum/viewtopic.php?t=6496132e",
+			wantVal: map[string]interface{}{
+				"announce":      "http://bt4.t-ru.org/ann",
+				"announce-list": []interface{}{[]interface{}{"http://bt4.t-ru.org/ann"}, []interface{}{"http://retracker.local/announce"}},
+				"comment":       "https://rutracker.org/forum/viewtopic.php?t=6496132",
+				"created by":    "BitComet/2.05",
+				"creation date": 1709731450,
+				"encoding":      "UTF-8",
+				"info": map[string]interface{}{
+					"length":       20028000,
+					"name":         "Atkins Evan - GoLang for Machine Learning - 2024.PDF",
+					"name.utf-8":   "Atkins Evan - GoLang for Machine Learning - 2024.PDF",
+					"piece length": 65536,
+				},
+				"publisher":     "rutracker.org",
+				"publisher-url": "https://rutracker.org/forum/viewtopic.php?t=6496132",
 			},
 		},
 	}
@@ -138,8 +174,8 @@ func TestBencode_Decode(t *testing.T) {
 			t.Logf("Testing for input: %s\n", tc.input)
 			buf := bytes.NewBuffer([]byte(tc.input))
 
-			data, err := NewDecoder(buf).Decode()
-
+			var data interface{}
+			err := NewDecoder(buf).Decode(&data)
 			if tc.wantErr != nil {
 				require.Error(t, err)
 				require.Equal(t, err, tc.wantErr)

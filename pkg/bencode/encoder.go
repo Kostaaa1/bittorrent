@@ -8,22 +8,6 @@ import (
 	"reflect"
 )
 
-// Byte strings
-// <length>:<data>
-// 5:Alice for "Alice"
-
-// Integers
-// i<number>e
-// i42e for 42, i-10e for -10, i0e for 0
-
-// Lists
-// l<element1><element2>e
-// l4:spam4:eggse
-
-// Dictionary
-// d<bencoded_key><bencoded_value>e
-// d4:name5:Alice3:agei30ee
-
 type primitives int
 
 const (

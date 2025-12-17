@@ -1,19 +1,17 @@
 package main
 
 import (
-	"bytes"
-	"fmt"
-
-	"github.com/jackpal/bencode-go"
+	"os"
 )
 
 type TorrentFile struct {
-	Announce     string `bencode:"announce"`
-	Info         Info   `bencode:"info"`
-	CreationDate int    `bencode:"creation date"`
-	Encoding     string `bencode:"encoding"`
-	Publisher    string `bencode:"publisher"`
-	PublisherURL string `bencode:"publisher url"`
+	Announce     string   `bencode:"announce"`
+	AnnounceList []string `bencode:"announce-list"`
+	Info         Info     `bencode:"info"`
+	CreationDate int      `bencode:"creation date"`
+	Encoding     string   `bencode:"encoding"`
+	Publisher    string   `bencode:"publisher"`
+	PublisherURL string   `bencode:"publisher url"`
 }
 
 type Info struct {
@@ -24,27 +22,20 @@ type Info struct {
 }
 
 func main() {
-	// tf := TorrentFile{
-	// 	Announce:     "test123",
-	// 	CreationDate: int(time.Now().Unix()),
-	// 	Encoding:     "UTF-8",
-	// 	Publisher:    "who",
-	// 	PublisherURL: "http://who.com",
-	// }
-
-	// t := reflect.TypeOf(tf)
-
-	// for i := 0; i < t.NumField(); i++ {
-	// 	field := t.Field(i)
-	// 	fmt.Println(field)
-	// }
-
-	buf := bytes.NewBuffer([]byte(
-		"d8:announce13:http://x/7:comment12:test torrent13:creation datei1700000000e4:infod6:lengthi5e4:name4:test12:piece lengthi5e6:pieces20:bbbbbbbbbbbbbbbbbbbbee",
-	))
-	v, err := bencode.Decode(buf)
+	f, err := os.Open("file.torrent")
 	if err != nil {
-		panic(err)
+		panic(nil)
 	}
-	fmt.Println(v)
+	defer f.Close()
+
+	// v, err := bencode.Decode(f)
+	// if err != nil {
+	// 	panic(err)
+	// }
+
+	// v, err := bencode.NewDecoder(f).Decode()
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// fmt.Println(v)
 }

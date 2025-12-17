@@ -3,7 +3,6 @@ package bencode
 import (
 	"bufio"
 	"errors"
-	"fmt"
 	"io"
 )
 
@@ -60,7 +59,6 @@ func (d *Decoder) readUntilDelim(delim byte, numsOnly bool) ([]byte, error) {
 }
 
 func (d *Decoder) readInt() (int, error) {
-	// consume i
 	d.r.ReadByte()
 
 	n, err := d.readUntilDelim('e', true)
@@ -157,9 +155,6 @@ func (d *Decoder) readDict() (map[string]interface{}, error) {
 func (d *Decoder) decode() (interface{}, error) {
 	b, err := d.r.Peek(1)
 	if err != nil {
-		// if err == io.EOF {
-		// 	return nil, ErrInvalidSyntax
-		// }
 		return nil, err
 	}
 
@@ -178,16 +173,21 @@ func (d *Decoder) decode() (interface{}, error) {
 	}
 }
 
-func (d *Decoder) Decode() (interface{}, error) {
+func (d *Decoder) Decode(src interface{}) (err error) {
 	data, err := d.decode()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	fmt.Println("DATA: ", data)
+
+	p, ok := src.(*interface{})
+	if !ok {
+		return err
+	}
+	*p = data
 
 	if d.r.Buffered() > 0 {
-		return nil, ErrTrailingDataLeft
+		return ErrTrailingDataLeft
 	}
 
-	return data, nil
+	return nil
 }
