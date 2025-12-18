@@ -23,10 +23,11 @@ func NewDecoder(r io.Reader) *Decoder {
 	return &Decoder{r: bufio.NewReader(r)}
 }
 
-func (d *Decoder) readIntBytes() (int, error) {
+// it would be much simple to just create [2]buffer to check first 2 characters to handle leading zeros instead of doing these condition soup
+func (d *Decoder) readIntBytes(delim byte) (int, error) {
 	n := 0
 	sign := 1
-	written := false
+	seenDigit := false
 
 	for {
 		b, err := d.r.ReadByte()
@@ -37,37 +38,37 @@ func (d *Decoder) readIntBytes() (int, error) {
 			return 0, err
 		}
 
-		if b == 'e' || b == ':' {
-			if b == 'e' && sign == -1 && n == 0 {
-				return 0, ErrInvalidIntegerFormat
-			}
+		// i-e
+		if b == 'e' && sign == -1 && n == 0 {
+			return 0, ErrInvalidIntegerFormat
+		}
+
+		if b == delim {
 			return sign * n, nil
 		}
 
 		isNum := !isNaN(b)
+
 		if !isNum && b != '-' {
 			return 0, ErrInvalidIntegerFormat
 		}
 
 		if b == '-' {
-			if written && sign == -1 {
+			sign = -1
+			if seenDigit && sign == -1 {
 				return 0, ErrInvalidIntegerFormat
 			}
-			sign = -1
 		}
-		if written && b == '-' {
+		if seenDigit && (b == '-' || n == 0) {
 			return 0, ErrInvalidIntegerFormat
 		}
 		if sign == -1 && b == '0' {
 			return 0, ErrInvalidIntegerFormat
 		}
-		if written && n == 0 {
-			return 0, ErrInvalidIntegerFormat
-		}
 
 		if isNum {
 			n = n*10 + int(b-'0')
-			written = true
+			seenDigit = true
 		}
 	}
 }
@@ -75,7 +76,7 @@ func (d *Decoder) readIntBytes() (int, error) {
 func (d *Decoder) readInt() (int, error) {
 	d.r.ReadByte()
 
-	n, err := d.readIntBytes()
+	n, err := d.readIntBytes('e')
 	if err != nil {
 		return 0, err
 	}
@@ -84,7 +85,7 @@ func (d *Decoder) readInt() (int, error) {
 }
 
 func (d *Decoder) readString() (string, error) {
-	intN, err := d.readIntBytes()
+	intN, err := d.readIntBytes(':')
 	if err != nil {
 		if errors.Is(err, ErrInvalidIntegerFormat) {
 			return "", ErrInvalidStringFormat

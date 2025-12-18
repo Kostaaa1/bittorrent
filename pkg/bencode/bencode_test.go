@@ -130,6 +130,21 @@ func TestBencode_Decode(t *testing.T) {
 			wantErr: ErrInvalidIntegerFormat,
 		},
 		{
+			name:    "int - plus sign invalid",
+			input:   "i+32e",
+			wantErr: ErrInvalidIntegerFormat,
+		},
+		{
+			name:    "int - non-digit characters",
+			input:   "i12a3e",
+			wantErr: ErrInvalidIntegerFormat,
+		},
+		{
+			name:    "int - space inside number",
+			input:   "i1 3e",
+			wantErr: ErrInvalidIntegerFormat,
+		},
+		{
 			name:    "list: strings and ints",
 			input:   "l5:hello5:worldi123e3:abce",
 			wantVal: []interface{}{"hello", "world", 123, "abc"},
