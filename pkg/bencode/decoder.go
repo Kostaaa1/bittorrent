@@ -11,10 +11,12 @@ type Decoder struct {
 }
 
 var (
-	ErrInvalidSyntax        = errors.New("bencode: invalid syntax")
-	ErrInvalidIntegerFormat = errors.New("bencode: invalid integer format")
-	ErrInvalidStringFormat  = errors.New("bencode: invalid string format")
-	ErrTrailingDataLeft     = errors.New("bencode: trailing data left")
+	ErrDictKeyNotString     = errors.New("dictionary key is not string")
+	errEnd                  = errors.New("end of data structure")
+	ErrInvalidSyntax        = errors.New("invalid syntax")
+	ErrInvalidIntegerFormat = errors.New("invalid integer format")
+	ErrInvalidStringFormat  = errors.New("invalid string format")
+	ErrTrailingDataLeft     = errors.New("trailing data left")
 )
 
 func NewDecoder(r io.Reader) *Decoder {
@@ -80,6 +82,9 @@ func (d *Decoder) readInt() (int, error) {
 func (d *Decoder) readString() (string, error) {
 	rest, err := d.readUntilDelim(':', true)
 	if err != nil {
+		if errors.Is(err, ErrInvalidIntegerFormat) {
+			return "", ErrInvalidStringFormat
+		}
 		return "", err
 	}
 
@@ -87,13 +92,11 @@ func (d *Decoder) readString() (string, error) {
 	if err != nil {
 		return "", err
 	}
-
 	if intN < 0 {
-		return "", ErrInvalidIntegerFormat
+		return "", ErrInvalidStringFormat
 	}
 
 	str := make([]byte, intN)
-
 	_, err = io.ReadFull(d.r, str)
 	if err != nil {
 		return "", err
@@ -107,17 +110,32 @@ func (d *Decoder) readList() ([]interface{}, error) {
 	list := make([]interface{}, 0)
 
 	for {
-		v, err := d.decode()
-		if err != nil {
-			if err == io.EOF {
-				break
+		if err := d.peekConsumeEnd(); err != nil {
+			if err == errEnd {
+				return list, nil
 			}
 			return nil, err
 		}
+
+		v, err := d.decodeValue()
+		if err != nil {
+			return nil, err
+		}
+
 		list = append(list, v)
 	}
+}
 
-	return list, nil
+func (d *Decoder) peekConsumeEnd() error {
+	b, err := d.r.Peek(1)
+	if err != nil {
+		return err
+	}
+	if b[0] == 'e' {
+		d.r.ReadByte()
+		return errEnd
+	}
+	return nil
 }
 
 func (d *Decoder) readDict() (map[string]interface{}, error) {
@@ -125,34 +143,33 @@ func (d *Decoder) readDict() (map[string]interface{}, error) {
 	dict := make(map[string]interface{})
 
 	for {
-		key, err := d.decode()
-		if err != nil {
-			if err == io.EOF {
-				break
+		if err := d.peekConsumeEnd(); err != nil {
+			if err == errEnd {
+				return dict, nil
 			}
+			return nil, err
+		}
+
+		key, err := d.decodeValue()
+		if err != nil {
 			return nil, err
 		}
 
 		k, ok := key.(string)
 		if !ok {
-			return nil, errors.New("key is not string?")
+			return nil, ErrDictKeyNotString
 		}
 
-		value, err := d.decode()
+		value, err := d.decodeValue()
 		if err != nil {
-			if err == io.EOF {
-				break
-			}
 			return nil, err
 		}
 
 		dict[k] = value
 	}
-
-	return dict, nil
 }
 
-func (d *Decoder) decode() (interface{}, error) {
+func (d *Decoder) decodeValue() (interface{}, error) {
 	b, err := d.r.Peek(1)
 	if err != nil {
 		return nil, err
@@ -165,18 +182,18 @@ func (d *Decoder) decode() (interface{}, error) {
 		return d.readDict()
 	case 'i':
 		return d.readInt()
-	case 'e':
-		d.r.ReadByte()
-		return nil, io.EOF
 	default:
 		return d.readString()
 	}
 }
 
 func (d *Decoder) Decode(src interface{}) (err error) {
-	data, err := d.decode()
+	data, err := d.decodeValue()
 	if err != nil {
 		return err
+	}
+	if d.r.Buffered() > 0 {
+		return ErrTrailingDataLeft
 	}
 
 	p, ok := src.(*interface{})
@@ -184,10 +201,6 @@ func (d *Decoder) Decode(src interface{}) (err error) {
 		return err
 	}
 	*p = data
-
-	if d.r.Buffered() > 0 {
-		return ErrTrailingDataLeft
-	}
 
 	return nil
 }

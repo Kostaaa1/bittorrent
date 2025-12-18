@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"os"
+	"test/pkg/bencode"
 )
 
 type TorrentFile struct {
@@ -24,18 +26,13 @@ type Info struct {
 func main() {
 	f, err := os.Open("file.torrent")
 	if err != nil {
-		panic(nil)
+		panic(err)
 	}
 	defer f.Close()
 
-	// v, err := bencode.Decode(f)
-	// if err != nil {
-	// 	panic(err)
-	// }
-
-	// v, err := bencode.NewDecoder(f).Decode()
-	// if err != nil {
-	// 	panic(err)
-	// }
-	// fmt.Println(v)
+	var v TorrentFile
+	if err := bencode.NewDecoder(f).Decode(&v); err != nil {
+		panic(err)
+	}
+	fmt.Println(v)
 }
