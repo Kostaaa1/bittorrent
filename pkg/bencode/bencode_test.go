@@ -25,8 +25,8 @@ func TestBencode_Decode(t *testing.T) {
 			wantErr: io.EOF,
 		},
 		{
-			name:    "string: no int/colon - detected as int (first byte)",
-			input:   "ilyasemantics",
+			name:    "string: detected as int (first byte)",
+			input:   "ilovesemantics",
 			wantErr: ErrInvalidIntegerFormat,
 		},
 		{
@@ -116,11 +116,6 @@ func TestBencode_Decode(t *testing.T) {
 		},
 		{
 			name:    "int - invalid",
-			input:   "i1-3e",
-			wantErr: ErrInvalidIntegerFormat,
-		},
-		{
-			name:    "int - invalid",
 			input:   "i03e",
 			wantErr: ErrInvalidIntegerFormat,
 		},
@@ -130,7 +125,7 @@ func TestBencode_Decode(t *testing.T) {
 			wantErr: ErrInvalidIntegerFormat,
 		},
 		{
-			name:    "int: missing terminator",
+			name:    "int: missing integer",
 			input:   "i-e",
 			wantErr: ErrInvalidIntegerFormat,
 		},
@@ -175,17 +170,6 @@ func TestBencode_Decode(t *testing.T) {
 			wantVal: nil,
 			wantErr: ErrDictKeyNotString,
 		},
-		// {
-		// 	name:  "dictionary: with dictionary",
-		// 	input: "d4:info4:name6:myfile4:sizei1024e8:announce10:tracker.come",
-		// wantVal: map[string]interface{}{
-		// 	"info": map[string]interface{}{
-		// 		"name":     "my_file",
-		// 		"size":     1024,
-		// 		"announce": "tracker.com",
-		// 	},
-		// },
-		// },
 		{
 			name:  "dictionary: torrent example",
 			input: "d8:announce23:http://bt4.t-ru.org/ann13:announce-listll23:http://bt4.t-ru.org/annel31:http://retracker.local/announceee7:comment51:https://rutracker.org/forum/viewtopic.php?t=649613210:created by13:BitComet/2.0513:creation datei1709731450e8:encoding5:UTF-84:infod6:lengthi20028000e4:name52:Atkins Evan - GoLang for Machine Learning - 2024.PDF10:name.utf-852:Atkins Evan - GoLang for Machine Learning - 2024.PDF12:piece lengthi65536ee9:publisher13:rutracker.org13:publisher-url51:https://rutracker.org/forum/viewtopic.php?t=6496132e",

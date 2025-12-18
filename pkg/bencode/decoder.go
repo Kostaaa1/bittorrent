@@ -26,7 +26,7 @@ func NewDecoder(r io.Reader) *Decoder {
 func (d *Decoder) readIntBytes() (int, error) {
 	n := 0
 	sign := 1
-	intAdded := false
+	written := false
 
 	for {
 		b, err := d.r.ReadByte()
@@ -38,36 +38,36 @@ func (d *Decoder) readIntBytes() (int, error) {
 		}
 
 		if b == 'e' || b == ':' {
+			if b == 'e' && sign == -1 && n == 0 {
+				return 0, ErrInvalidIntegerFormat
+			}
 			return sign * n, nil
 		}
 
-		if b == '-' {
-			sign = -1
-		}
-
 		isNum := !isNaN(b)
-
-		if sign == -1 && b == '-' {
-			return 0, ErrInvalidIntegerFormat
-		}
 		if !isNum && b != '-' {
 			return 0, ErrInvalidIntegerFormat
 		}
-		if intAdded {
+
+		if b == '-' {
+			if written && sign == -1 {
+				return 0, ErrInvalidIntegerFormat
+			}
+			sign = -1
 		}
-		// if sign == -1 && b == '0' {
-		// 	return 0, ErrInvalidIntegerFormat
-		// }
-		// if intAdded && n == 0 {
-		// 	return 0, ErrInvalidIntegerFormat
-		// }
+		if written && b == '-' {
+			return 0, ErrInvalidIntegerFormat
+		}
+		if sign == -1 && b == '0' {
+			return 0, ErrInvalidIntegerFormat
+		}
+		if written && n == 0 {
+			return 0, ErrInvalidIntegerFormat
+		}
 
 		if isNum {
 			n = n*10 + int(b-'0')
-		}
-
-		if b != '-' && b != '0' && !intAdded {
-			intAdded = true
+			written = true
 		}
 	}
 }
@@ -79,6 +79,7 @@ func (d *Decoder) readInt() (int, error) {
 	if err != nil {
 		return 0, err
 	}
+
 	return n, nil
 }
 
