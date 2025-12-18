@@ -23,64 +23,67 @@ func NewDecoder(r io.Reader) *Decoder {
 	return &Decoder{r: bufio.NewReader(r)}
 }
 
-func (d *Decoder) readUntilDelim(delim byte, numsOnly bool) ([]byte, error) {
-	n := make([]byte, 0)
-	isNumberValid := false
+func (d *Decoder) readIntBytes() (int, error) {
+	n := 0
+	sign := 1
+	intAdded := false
 
 	for {
 		b, err := d.r.ReadByte()
 		if err != nil {
-			return nil, err
+			if err == io.EOF {
+				return 0, ErrInvalidIntegerFormat
+			}
+			return 0, err
 		}
 
-		if b == delim {
-			break
+		if b == 'e' || b == ':' {
+			return sign * n, nil
 		}
 
-		n = append(n, b)
+		if b == '-' {
+			sign = -1
+		}
 
-		if numsOnly {
-			if isNaN(b) && b != '-' {
-				return nil, ErrInvalidIntegerFormat
-			}
-			if b == '-' && len(n) > 1 {
-				return nil, ErrInvalidIntegerFormat
-			}
-			if !isNumberValid && len(n) >= 2 {
-				zeros := n[0] == '0' && n[1] >= '0'   // 00
-				negZero := n[0] == '-' && n[1] <= '0' // -0
-				if zeros || negZero {
-					return nil, ErrInvalidIntegerFormat
-				}
-				isNumberValid = true
-			}
+		isNum := !isNaN(b)
+
+		if sign == -1 && b == '-' {
+			return 0, ErrInvalidIntegerFormat
+		}
+		if !isNum && b != '-' {
+			return 0, ErrInvalidIntegerFormat
+		}
+		if intAdded {
+		}
+		// if sign == -1 && b == '0' {
+		// 	return 0, ErrInvalidIntegerFormat
+		// }
+		// if intAdded && n == 0 {
+		// 	return 0, ErrInvalidIntegerFormat
+		// }
+
+		if isNum {
+			n = n*10 + int(b-'0')
+		}
+
+		if b != '-' && b != '0' && !intAdded {
+			intAdded = true
 		}
 	}
-
-	return n, nil
 }
 
 func (d *Decoder) readInt() (int, error) {
 	d.r.ReadByte()
 
-	n, err := d.readUntilDelim('e', true)
+	n, err := d.readIntBytes()
 	if err != nil {
-		if err == io.EOF {
-			return 0, ErrInvalidIntegerFormat
-		}
 		return 0, err
 	}
-
-	intN, err := bytesToInt(n)
-	if err != nil {
-		return 0, ErrInvalidIntegerFormat
-	}
-
-	return intN, nil
+	return n, nil
 }
 
 func (d *Decoder) readString() (string, error) {
-	rest, err := d.readUntilDelim(':', true)
+	intN, err := d.readIntBytes()
 	if err != nil {
 		if errors.Is(err, ErrInvalidIntegerFormat) {
 			return "", ErrInvalidStringFormat
@@ -88,10 +91,6 @@ func (d *Decoder) readString() (string, error) {
 		return "", err
 	}
 
-	intN, err := bytesToInt(rest)
-	if err != nil {
-		return "", err
-	}
 	if intN < 0 {
 		return "", ErrInvalidStringFormat
 	}

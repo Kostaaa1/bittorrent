@@ -90,6 +90,16 @@ func TestBencode_Decode(t *testing.T) {
 			wantVal: 0,
 		},
 		{
+			name:    "int",
+			input:   "i20043e",
+			wantVal: 20043,
+		},
+		{
+			name:    "int",
+			input:   "i1043002e",
+			wantVal: 1043002,
+		},
+		{
 			name:    "int - invalid",
 			input:   "i-0e",
 			wantErr: ErrInvalidIntegerFormat,
@@ -97,6 +107,11 @@ func TestBencode_Decode(t *testing.T) {
 		{
 			name:    "int - invalid",
 			input:   "i-23-4-2e",
+			wantErr: ErrInvalidIntegerFormat,
+		},
+		{
+			name:    "int - invalid",
+			input:   "i1-3e",
 			wantErr: ErrInvalidIntegerFormat,
 		},
 		{
