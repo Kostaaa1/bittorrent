@@ -4,12 +4,17 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/sha1"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
+	"sync"
+	"time"
 
 	"github.com/jackpal/bencode-go"
 )
@@ -122,32 +127,56 @@ type peersDictionary struct {
 	Port   int    `bencode:"port"`
 }
 
-func (tf *TorrentFile) discoverPeers(peerID [20]byte, port uint16) error {
+func readBinaryPeers(peers string) ([]string, error) {
+	if len(peers)%6 != 0 {
+		return nil, errors.New("failed to read peers: invalid peers format (not divisible by 6)")
+	}
+
+	numPeers := len(peers) / 6
+	data := make([]string, numPeers)
+
+	for i := range numPeers {
+		data[i] = fmt.Sprintf("%d.%d.%d.%d:%d",
+			peers[i+0],
+			peers[i+1],
+			peers[i+2],
+			peers[i+3],
+			binary.BigEndian.Uint16([]byte{peers[i+4], peers[i+5]}),
+		)
+	}
+
+	return data, nil
+}
+
+func (tf *TorrentFile) discoverPeers(peerID [20]byte, port uint16) ([]string, error) {
 	u, err := tf.buildHTTPTrackerURL(peerID, port)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	resp, err := http.Get(u)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	var response bencodeTrackerResponse
 	if err := bencode.Unmarshal(resp.Body, &response); err != nil {
-		return err
+		return nil, err
 	}
 
 	fmt.Println(response)
 
 	if response.FailureReason != "" {
-		return fmt.Errorf("failed to discover peers: %v", response)
+		return nil, fmt.Errorf("failed to discover peers: %v", response)
 	}
 
-	fmt.Println(len(response.Peers))
+	peers, err := readBinaryPeers(response.Peers)
+	if err != nil {
+		return nil, err
+	}
 
-	return nil
+	return peers, nil
 }
 
 func clientID() ([20]byte, error) {
@@ -157,6 +186,24 @@ func clientID() ([20]byte, error) {
 		return [20]byte{}, err
 	}
 	return buf, nil
+}
+
+type Handshake struct {
+	Pstrlen  uint8
+	Pstr     string
+	Reserved [8]byte
+	InfoHash [20]byte
+	PeerID   [20]byte
+}
+
+func (h *Handshake) Bytes() []byte {
+	b := make([]byte, 49+h.Pstrlen)
+	b = append(b, h.Pstrlen)
+	b = append(b, []byte(h.Pstr)...)
+	b = append(b, h.Reserved[:]...)
+	b = append(b, h.InfoHash[:]...)
+	b = append(b, h.PeerID[:]...)
+	return b
 }
 
 func main() {
@@ -177,11 +224,60 @@ func main() {
 	}
 
 	port := 6881
-
 	id, err := clientID()
 	if err != nil {
 		panic(err)
 	}
 
-	tf.discoverPeers(id, uint16(port))
+	peers, err := tf.discoverPeers(id, uint16(port))
+	if err != nil {
+		panic(err)
+	}
+
+	handshake := Handshake{
+		Pstrlen:  19,
+		Pstr:     "BitTorrent Protocol",
+		Reserved: [8]byte{},
+		InfoHash: tf.InfoHash,
+		PeerID:   id,
+	}
+
+	var wg sync.WaitGroup
+	for _, peer := range peers {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			conn, err := net.Dial("tcp", peer)
+			if err != nil {
+				fmt.Println("dial failed:", err)
+				return
+			}
+
+			conn.SetReadDeadline(time.Now().Add(time.Second * 5))
+
+			if _, err := conn.Write(handshake.Bytes()); err != nil {
+				panic(err)
+			}
+
+			for {
+				buf := make([]byte, 4096)
+
+				n, err := conn.Read(buf)
+				if err != nil {
+					if err == io.EOF {
+						fmt.Println("Handle io.EOF")
+						break
+					}
+					fmt.Println("ERROR:", err)
+					return
+				}
+
+				fmt.Println(string(buf[:n]))
+			}
+		}()
+	}
+
+	wg.Wait()
 }
