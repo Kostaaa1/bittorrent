@@ -3,7 +3,9 @@ package bencode
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"io"
+	"reflect"
 )
 
 type Decoder struct {
@@ -118,7 +120,7 @@ func (d *Decoder) readList() ([]interface{}, error) {
 			return nil, err
 		}
 
-		v, err := d.decodeValue()
+		v, err := d.decode()
 		if err != nil {
 			return nil, err
 		}
@@ -151,7 +153,7 @@ func (d *Decoder) readDict() (map[string]interface{}, error) {
 			return nil, err
 		}
 
-		key, err := d.decodeValue()
+		key, err := d.decode()
 		if err != nil {
 			return nil, err
 		}
@@ -161,7 +163,7 @@ func (d *Decoder) readDict() (map[string]interface{}, error) {
 			return nil, ErrDictKeyNotString
 		}
 
-		value, err := d.decodeValue()
+		value, err := d.decode()
 		if err != nil {
 			return nil, err
 		}
@@ -170,7 +172,7 @@ func (d *Decoder) readDict() (map[string]interface{}, error) {
 	}
 }
 
-func (d *Decoder) decodeValue() (interface{}, error) {
+func (d *Decoder) decode() (interface{}, error) {
 	b, err := d.r.Peek(1)
 	if err != nil {
 		return nil, err
@@ -188,20 +190,85 @@ func (d *Decoder) decodeValue() (interface{}, error) {
 	}
 }
 
-func (d *Decoder) Decode(src interface{}) (err error) {
-	data, err := d.decodeValue()
+func (d *Decoder) Decode(src interface{}) error {
+	data, err := d.decode()
 	if err != nil {
 		return err
 	}
 	if d.r.Buffered() > 0 {
 		return ErrTrailingDataLeft
 	}
+	return unmarshal(src, data)
+}
+
+func unmarshal(src, data interface{}) error {
+	t := reflect.TypeOf(src)
+	if t.Kind() != reflect.Pointer {
+		return errors.New("src needs to be a pointer")
+	}
 
 	p, ok := src.(*interface{})
-	if !ok {
-		return err
+	if ok {
+		*p = data
+		return nil
 	}
-	*p = data
+
+	return buildStruct(reflect.ValueOf(src).Elem(), t.Elem(), data)
+}
+
+func buildStruct(v reflect.Value, t reflect.Type, data interface{}) error {
+	mapped, ok := data.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf(
+			"bencode: expected map[string]interface{}, got %T",
+			data,
+		)
+	}
+
+	if v.Kind() != reflect.Struct {
+		return fmt.Errorf("bencode: value.Kind() is not a struct: %v", v.Kind())
+	}
+
+	for i := range t.NumField() {
+		fieldVal := v.Field(i)
+		fieldType := t.Field(i)
+
+		if !fieldVal.CanSet() {
+			continue
+		}
+
+		value, ok := mapped[fieldType.Tag.Get("bencode")]
+		if !ok {
+			continue
+		}
+
+		if err := setValue(fieldVal, fieldType, value); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func setValue(fieldVal reflect.Value, fieldType reflect.StructField, value interface{}) error {
+	if fieldVal.Kind() == reflect.Struct {
+		return buildStruct(fieldVal, fieldType.Type, value)
+	}
+
+	valueType := reflect.TypeOf(value)
+
+	if valueType != nil {
+		assignable := valueType.AssignableTo(fieldType.Type)
+		if assignable {
+			fieldVal.Set(reflect.ValueOf(value))
+			return nil
+		}
+		if valueType.ConvertibleTo(fieldType.Type) && !assignable {
+			fmt.Println("convirtible: ", valueType, fieldType.Type)
+			return nil
+		}
+		return fmt.Errorf("bencode: cannot unmarshal %s into Go value of type %s", valueType, fieldType.Type.Kind())
+	}
 
 	return nil
 }
