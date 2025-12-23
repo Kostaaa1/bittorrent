@@ -1,16 +1,21 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha1"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
 	"test/pkg/bencode"
+	"time"
 )
 
 type TorrentFile struct {
@@ -94,10 +99,8 @@ type TrackerResponse struct {
 	TrackerID      string `bencode:"tracker id"`
 	Complete       int    `bencode:"complete"`
 	Incomplete     int    `bencode:"incomplete"`
-	// Peers          []interface{} `bencode:"peers"`
-	// Peers  []map[string]interface{} `bencode:"peers"`
-	Peers  []bencodePeer `bencode:"peers"`
-	Peers6 string        `bencode:"peers6"`
+	Peers          []byte `bencode:"peers"`
+	Peers6         string `bencode:"peers6"`
 }
 
 func (tf *TorrentFile) buildHttpTrackerURL(peerID [20]byte, port uint16) (*url.URL, error) {
@@ -113,7 +116,7 @@ func (tf *TorrentFile) buildHttpTrackerURL(peerID [20]byte, port uint16) (*url.U
 		"uploaded":   []string{"0"},
 		"downloaded": []string{"0"},
 		"left":       []string{strconv.Itoa(tf.Length)},
-		// "compact":    []string{"1"},
+		"compact":    []string{"1"},
 	}
 
 	parsed.RawQuery = v.Encode()
@@ -121,36 +124,55 @@ func (tf *TorrentFile) buildHttpTrackerURL(peerID [20]byte, port uint16) (*url.U
 	return parsed, nil
 }
 
-func (tf *TorrentFile) discoverPeers(peerID [20]byte, port uint16) error {
+func (tf *TorrentFile) discoverPeers(peerID [20]byte, port uint16) ([]string, error) {
 	trackerURL, err := tf.buildHttpTrackerURL(peerID, port)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	resp, err := http.Get(trackerURL.String())
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	var response TrackerResponse
 	if err := bencode.NewDecoder(resp.Body).Decode(&response); err != nil {
-		return err
+		return nil, err
 	}
 
-	fmt.Println(response)
+	peers := make([]string, len(response.Peers)/6)
 
-	return nil
+	r := bytes.NewReader(response.Peers)
+	for {
+		p := make([]byte, 6)
+
+		n, err := r.Read(p)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
+		}
+
+		if n != 6 {
+			return nil, errors.New("malformed peers data")
+		}
+
+		port := binary.BigEndian.Uint16(p[4:6])
+		addr := fmt.Sprintf("%d.%d.%d.%d:%d", p[0], p[1], p[2], p[3], port)
+		peers = append(peers, addr)
+	}
+
+	return peers, nil
 }
 
 func getPeerID() ([20]byte, error) {
 	buf := [20]byte{}
-
 	_, err := rand.Read(buf[:])
 	if err != nil {
 		return buf, err
 	}
-
 	return buf, nil
 }
 
@@ -176,8 +198,54 @@ func main() {
 		log.Fatal(err)
 	}
 
-	err = tf.discoverPeers(peerID, 6881)
+	hs := Handshake{
+		Pstrlen:   19,
+		Pstr:      "BitTorrent protocol",
+		Reserverd: [8]byte{},
+		InfoHash:  tf.InfoHash,
+		PeerID:    peerID,
+	}
+
+	handshake := hs.Bytes()
+	fmt.Println("Handshake bytes:", handshake)
+
+	peers, err := tf.discoverPeers(peerID, 6881)
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	for _, peer := range peers {
+		fmt.Println(peer)
+
+		conn, err := net.DialTimeout("tcp", peer, time.Second*5)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		_, err = conn.Write(handshake)
+		if err != nil {
+			fmt.Println("failed to write handshake")
+			continue
+		}
+
+	}
+}
+
+type Handshake struct {
+	Pstrlen   int      `bencode:"pstrlen"`
+	Pstr      string   `bencode:"pstrlen"`
+	Reserverd [8]byte  `bencode:"reserved"`
+	InfoHash  [20]byte `bencode:"info_hash"`
+	PeerID    [20]byte `bencode:"peer_id"`
+}
+
+func (hs *Handshake) Bytes() []byte {
+	buf := make([]byte, 48+len(hs.Pstr))
+	buf[0] = byte(len(hs.Pstr))
+	curr := 1
+	curr += copy(buf[curr:], []byte(hs.Pstr))
+	curr += copy(buf[curr:], hs.Reserverd[:])
+	curr += copy(buf[curr:], hs.InfoHash[:])
+	curr += copy(buf[curr:], hs.PeerID[:])
+	return buf
 }

@@ -210,36 +210,104 @@ func unmarshal(src, data interface{}) error {
 	if t.Kind() != reflect.Pointer {
 		return errors.New("src needs to be a pointer")
 	}
+
 	p, ok := src.(*interface{})
 	if ok {
 		*p = data
 		return nil
 	}
+
 	return decodeInto(reflect.ValueOf(src).Elem(), data)
 }
 
-func decodeInto(value reflect.Value, src interface{}) error {
-	switch value.Kind() {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		value.SetInt(reflect.ValueOf(src).Int())
-		return nil
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		value.SetUint(reflect.ValueOf(src).Uint())
-		return nil
-	case reflect.String:
-		value.SetString(reflect.ValueOf(src).String())
-		return nil
-	case reflect.Map, reflect.Struct:
-		fmt.Println("decode to struct")
-		return decodeIntoStruct(value, src.(map[string]interface{}))
-	case reflect.Slice:
-		fmt.Println("decode to slice")
-		return decodeIntoSlice(value, src.([]interface{}))
+func decodeInto(dst reflect.Value, src interface{}) error {
+	if !dst.CanSet() {
+		return fmt.Errorf("cannot set %s", dst.Type())
 	}
 
-	s := reflect.ValueOf(src)
-	fmt.Println("unsupported decode type", value.Kind(), value.Type().Kind(), s.Type(), s.Kind())
-	return errors.New("unsupported decode type")
+	// Handle interface{} - just set the value directly
+	if dst.Kind() == reflect.Interface {
+		dst.Set(reflect.ValueOf(src))
+		return nil
+	}
+
+	// Handle pointer types - allocate if nil and decode into the element
+	if dst.Kind() == reflect.Ptr {
+		if dst.IsNil() {
+			dst.Set(reflect.New(dst.Type().Elem()))
+		}
+		return decodeInto(dst.Elem(), src)
+	}
+
+	switch dst.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		n, ok := src.(int)
+		if !ok {
+			return fmt.Errorf("expected int, got %T", src)
+		}
+		return decodeIntoInt(dst, n)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		n, ok := src.(int)
+		if !ok {
+			return fmt.Errorf("expected int, got %T", src)
+		}
+		return decodeIntoUint(dst, n)
+	case reflect.String:
+		s, ok := src.(string)
+		if !ok {
+			return fmt.Errorf("expected string, got %T", src)
+		}
+		dst.SetString(s)
+		return nil
+	case reflect.Slice:
+		// Handle []byte specially - bencode strings can be decoded into []byte
+		if dst.Type().Elem().Kind() == reflect.Uint8 {
+			s, ok := src.(string)
+			if ok {
+				dst.SetBytes([]byte(s))
+				return nil
+			}
+		}
+		list, ok := src.([]interface{})
+		if !ok {
+			return fmt.Errorf("expected list, got %T", src)
+		}
+		return decodeIntoSlice(dst, list)
+	case reflect.Map:
+		dict, ok := src.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("expected dict, got %T", src)
+		}
+		return decodeIntoMap(dst, dict)
+	case reflect.Struct:
+		dict, ok := src.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("expected dict, got %T", src)
+		}
+		return decodeIntoStruct(dst, dict)
+	}
+
+	return fmt.Errorf("unsupported decode type: %s", dst.Kind())
+}
+
+func decodeIntoInt(value reflect.Value, n int) error {
+	n64 := int64(n)
+	if value.OverflowInt(n64) {
+		return fmt.Errorf("overflow %d for %s", n, value.Type())
+	}
+	value.SetInt(n64)
+	return nil
+}
+
+func decodeIntoUint(value reflect.Value, n int) error {
+	if n < 0 {
+		return fmt.Errorf("negative %d for %s", n, value.Type())
+	}
+	if value.OverflowUint(uint64(n)) {
+		return fmt.Errorf("overflow %d for %s", n, value.Type())
+	}
+	value.SetUint(uint64(n))
+	return nil
 }
 
 func decodeIntoStruct(dst reflect.Value, src map[string]interface{}) error {
@@ -247,9 +315,18 @@ func decodeIntoStruct(dst reflect.Value, src map[string]interface{}) error {
 
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
+		fieldVal := dst.Field(i)
+
+		if !fieldVal.CanSet() {
+			continue
+		}
 
 		key := field.Tag.Get("bencode")
 		if key == "" {
+			key = field.Name
+		}
+		if key == "-" {
+			continue
 		}
 
 		value, ok := src[key]
@@ -257,12 +334,10 @@ func decodeIntoStruct(dst reflect.Value, src map[string]interface{}) error {
 			continue
 		}
 
-		fmt.Println("DECOIDING:", dst.Field(i).Type(), value)
-		if err := decodeInto(dst.Field(i), value); err != nil {
+		if err := decodeInto(fieldVal, value); err != nil {
 			return err
 		}
 	}
-
 	return nil
 }
 
@@ -272,6 +347,33 @@ func decodeIntoSlice(dst reflect.Value, src []interface{}) error {
 		if err := decodeInto(sliceValue.Index(i), src[i]); err != nil {
 			return err
 		}
+	}
+	dst.Set(sliceValue)
+	return nil
+}
+
+func decodeIntoMap(dst reflect.Value, src map[string]interface{}) error {
+	if dst.IsNil() {
+		dst.Set(reflect.MakeMap(dst.Type()))
+	}
+
+	keyType := dst.Type().Key()
+	valType := dst.Type().Elem()
+
+	for k, v := range src {
+		keyVal := reflect.New(keyType).Elem()
+		if keyType.Kind() == reflect.String {
+			keyVal.SetString(k)
+		} else {
+			return fmt.Errorf("map key must be string, got %s", keyType)
+		}
+
+		valVal := reflect.New(valType).Elem()
+		if err := decodeInto(valVal, v); err != nil {
+			return err
+		}
+
+		dst.SetMapIndex(keyVal, valVal)
 	}
 	return nil
 }
