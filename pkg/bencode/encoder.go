@@ -6,60 +6,131 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"sort"
 )
 
-type primitives int
-
-const (
-	typeStr primitives = iota
-	typeInt
-	typeList
-	typeDict
+var (
+	ErrUnsupportedEncodeType = errors.New("unsupported encode type")
 )
 
 type encoder struct {
 	w io.Writer
 }
 
-func (e *encoder) writeStr(v string) {
-	s := fmt.Sprintf("%d:%s", len(v), v)
-	e.w.Write([]byte(s))
+func NewEncoder(w io.Writer) *encoder {
+	return &encoder{w: w}
 }
 
-func (e *encoder) writeInt(v int64) {
-	s := fmt.Sprintf("i%de", v)
-	e.w.Write([]byte(s))
-}
-
-func (e *encoder) writeSlice(v reflect.Value) {
-	e.w.Write([]byte("l"))
-	for i := 0; i < v.Len(); i++ {
-		value := v.Index(i)
-		e.encode(value)
+func Marshal(v any) ([]byte, error) {
+	buf := new(bytes.Buffer)
+	enc := &encoder{w: buf}
+	if err := enc.encode(v); err != nil {
+		return nil, err
 	}
-	e.w.Write([]byte("e"))
+	return buf.Bytes(), nil
 }
 
-func reflectValue(v any) reflect.Value {
+func (e *encoder) Encode(v any) error {
+	return e.encode(v)
+}
+
+func (e *encoder) write(b []byte) error {
+	_, err := e.w.Write(b)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (e *encoder) writeStr(v string) error {
+	s := fmt.Sprintf("%d:%s", len(v), v)
+	return e.write([]byte(s))
+}
+
+func (e *encoder) writeInt(v int64) error {
+	s := fmt.Sprintf("i%de", v)
+	return e.write([]byte(s))
+}
+
+func (e *encoder) writeMap(v reflect.Value) error {
+	keys := v.MapKeys()
+	sort.Slice(keys, func(i, j int) bool {
+		return keys[i].String() < keys[j].String()
+	})
+
+	if err := e.write([]byte("d")); err != nil {
+		return err
+	}
+
+	for _, key := range keys {
+		elem := v.MapIndex(key)
+		if elem.Kind() == reflect.Interface || elem.Kind() == reflect.Ptr {
+			elem = elem.Elem()
+		}
+
+		if key.Kind() != reflect.String {
+			return ErrDictKeyNotString
+		}
+
+		if err := e.writeStr(key.String()); err != nil {
+			return err
+		}
+
+		if err := e.encode(elem); err != nil {
+			return err
+		}
+	}
+
+	return e.write([]byte("e"))
+}
+
+func (e *encoder) writeSlice(v reflect.Value) error {
+	if err := e.write([]byte("l")); err != nil {
+		return err
+	}
+	for i := 0; i < v.Len(); i++ {
+		elem := v.Index(i)
+		if elem.Kind() == reflect.Interface || elem.Kind() == reflect.Ptr {
+			elem = elem.Elem()
+		}
+		if err := e.encode(elem); err != nil {
+			return err
+		}
+	}
+	return e.write([]byte("e"))
+}
+
+func structToMap(value reflect.Value) reflect.Value {
+	reflectedMap := reflect.MakeMap(reflect.TypeOf(map[string]any{}))
+
+	for i := 0; i < value.NumField(); i++ {
+		field := value.Type().Field(i)
+		fieldValue := value.Field(i)
+		if field.Anonymous || field.PkgPath != "" {
+			continue
+		}
+		key := field.Name
+		if tag, ok := field.Tag.Lookup("bencode"); ok {
+			if tag == "-" {
+				continue
+			}
+			key = tag
+		}
+		reflectedMap.SetMapIndex(reflect.ValueOf(key), fieldValue)
+	}
+
+	return reflectedMap
+}
+
+func (e *encoder) encode(v any) error {
 	var value reflect.Value
+
 	switch t := v.(type) {
 	case reflect.Value:
 		value = t
 	default:
 		value = reflect.ValueOf(v)
 	}
-	return value
-}
-
-func (e *encoder) encode(v any) error {
-	value := reflectValue(v)
-	// first check if v is not valid type to avoid return nil in switch cases
-
-	fmt.Println("KIND: ", v, value.Kind())
-
-	// switch s := v.(type) {
-	// case []byte:
-	// }
 
 	switch value.Kind() {
 	case reflect.Int,
@@ -67,34 +138,22 @@ func (e *encoder) encode(v any) error {
 		reflect.Int16,
 		reflect.Int32,
 		reflect.Int64:
-		e.writeInt(value.Int())
-		return nil
+		return e.writeInt(value.Int())
 	case reflect.Uint,
 		reflect.Uint8,
 		reflect.Uint16,
 		reflect.Uint32,
 		reflect.Uint64:
-		e.writeInt(int64(value.Uint()))
-		return nil
+		return e.writeInt(int64(value.Uint()))
 	case reflect.String:
-		e.writeStr(value.String())
-		return nil
+		return e.writeStr(value.String())
 	case reflect.Slice:
-		e.writeSlice(value)
-		return nil
+		return e.writeSlice(value)
+	case reflect.Map:
+		return e.writeMap(value)
+	case reflect.Struct:
+		return e.writeMap(structToMap(value))
 	}
 
-	return errors.New("failed to encode")
-}
-
-// detect cycles / stack overflows
-// NaN, +Inf, -Inf
-
-func Encode(v any) ([]byte, error) {
-	buf := new(bytes.Buffer)
-	enc := &encoder{w: buf}
-	if err := enc.encode(v); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	return ErrUnsupportedEncodeType
 }

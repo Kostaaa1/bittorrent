@@ -8,20 +8,24 @@ import (
 	"reflect"
 )
 
+// TODO: wrapped errors - imitate json package errors
+// TODO: allow multiple same struct tags - compare struct type with bencode
+// for example, allow this:
+// type TrackerResponse struct {
+// 	Interval int         `bencode:"interval"`
+// 	Peers    interface{} `bencode:"peers"`
+// 	Peers    string 	 `bencode:"peers"`
+// }
+// TODO: support for comparible types (e.g string -> []byte etc)
+
 type Decoder struct {
 	r *bufio.Reader
 }
 
-var (
-	ErrDictKeyNotString     = errors.New("dictionary key is not string")
-	errEnd                  = errors.New("end of data structure")
-	ErrInvalidSyntax        = errors.New("invalid syntax")
-	ErrInvalidIntegerFormat = errors.New("invalid integer format")
-	ErrInvalidStringFormat  = errors.New("invalid string format")
-	ErrTrailingDataLeft     = errors.New("trailing data left")
-)
-
 func NewDecoder(r io.Reader) *Decoder {
+	if v, ok := r.(*bufio.Reader); ok {
+		return &Decoder{r: v}
+	}
 	return &Decoder{r: bufio.NewReader(r)}
 }
 
@@ -49,9 +53,9 @@ func (d *Decoder) readIntBytes(delim byte) (int, error) {
 			return sign * n, nil
 		}
 
-		isNum := !isNaN(b)
+		isNaN := b < '0' || b > '9'
 
-		if !isNum && b != '-' {
+		if isNaN && b != '-' {
 			return 0, ErrInvalidIntegerFormat
 		}
 
@@ -68,7 +72,7 @@ func (d *Decoder) readIntBytes(delim byte) (int, error) {
 			return 0, ErrInvalidIntegerFormat
 		}
 
-		if isNum {
+		if !isNaN {
 			n = n*10 + int(b-'0')
 			seenDigit = true
 		}
@@ -206,43 +210,55 @@ func unmarshal(src, data interface{}) error {
 	if t.Kind() != reflect.Pointer {
 		return errors.New("src needs to be a pointer")
 	}
-
 	p, ok := src.(*interface{})
 	if ok {
 		*p = data
 		return nil
 	}
-
-	return buildStruct(reflect.ValueOf(src).Elem(), t.Elem(), data)
+	return decodeInto(reflect.ValueOf(src).Elem(), data)
 }
 
-func buildStruct(v reflect.Value, t reflect.Type, data interface{}) error {
-	mapped, ok := data.(map[string]interface{})
-	if !ok {
-		return fmt.Errorf(
-			"bencode: expected map[string]interface{}, got %T",
-			data,
-		)
+func decodeInto(value reflect.Value, src interface{}) error {
+	switch value.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		value.SetInt(reflect.ValueOf(src).Int())
+		return nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		value.SetUint(reflect.ValueOf(src).Uint())
+		return nil
+	case reflect.String:
+		value.SetString(reflect.ValueOf(src).String())
+		return nil
+	case reflect.Map, reflect.Struct:
+		fmt.Println("decode to struct")
+		return decodeIntoStruct(value, src.(map[string]interface{}))
+	case reflect.Slice:
+		fmt.Println("decode to slice")
+		return decodeIntoSlice(value, src.([]interface{}))
 	}
 
-	if v.Kind() != reflect.Struct {
-		return fmt.Errorf("bencode: value.Kind() is not a struct: %v", v.Kind())
-	}
+	s := reflect.ValueOf(src)
+	fmt.Println("unsupported decode type", value.Kind(), value.Type().Kind(), s.Type(), s.Kind())
+	return errors.New("unsupported decode type")
+}
 
-	for i := range t.NumField() {
-		fieldVal := v.Field(i)
-		fieldType := t.Field(i)
+func decodeIntoStruct(dst reflect.Value, src map[string]interface{}) error {
+	t := dst.Type()
 
-		if !fieldVal.CanSet() {
-			continue
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+
+		key := field.Tag.Get("bencode")
+		if key == "" {
 		}
 
-		value, ok := mapped[fieldType.Tag.Get("bencode")]
+		value, ok := src[key]
 		if !ok {
 			continue
 		}
 
-		if err := setValue(fieldVal, fieldType, value); err != nil {
+		fmt.Println("DECOIDING:", dst.Field(i).Type(), value)
+		if err := decodeInto(dst.Field(i), value); err != nil {
 			return err
 		}
 	}
@@ -250,25 +266,12 @@ func buildStruct(v reflect.Value, t reflect.Type, data interface{}) error {
 	return nil
 }
 
-func setValue(fieldVal reflect.Value, fieldType reflect.StructField, value interface{}) error {
-	if fieldVal.Kind() == reflect.Struct {
-		return buildStruct(fieldVal, fieldType.Type, value)
-	}
-
-	valueType := reflect.TypeOf(value)
-
-	if valueType != nil {
-		assignable := valueType.AssignableTo(fieldType.Type)
-		if assignable {
-			fieldVal.Set(reflect.ValueOf(value))
-			return nil
+func decodeIntoSlice(dst reflect.Value, src []interface{}) error {
+	sliceValue := reflect.MakeSlice(dst.Type(), len(src), len(src))
+	for i := 0; i < len(src); i++ {
+		if err := decodeInto(sliceValue.Index(i), src[i]); err != nil {
+			return err
 		}
-		if valueType.ConvertibleTo(fieldType.Type) && !assignable {
-			fmt.Println("convirtible: ", valueType, fieldType.Type)
-			return nil
-		}
-		return fmt.Errorf("bencode: cannot unmarshal %s into Go value of type %s", valueType, fieldType.Type.Kind())
 	}
-
 	return nil
 }
