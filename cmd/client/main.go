@@ -9,13 +9,11 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
 	"test/pkg/bencode"
-	"time"
 )
 
 type TorrentFile struct {
@@ -28,8 +26,8 @@ type TorrentFile struct {
 }
 
 type bencodeTorrent struct {
-	Announce string       `bencode:"announce"`
-	Info     *bencodeInfo `bencode:"info"`
+	Announce string      `bencode:"announce"`
+	Info     bencodeInfo `bencode:"info"`
 }
 
 type bencodeInfo struct {
@@ -147,6 +145,7 @@ func (tf *TorrentFile) discoverPeers(peerID [20]byte, port uint16) ([]string, er
 	peers := make([]string, len(response.Peers)/6)
 
 	r := bytes.NewReader(response.Peers)
+
 	for {
 		p := make([]byte, 6)
 
@@ -162,6 +161,7 @@ func (tf *TorrentFile) discoverPeers(peerID [20]byte, port uint16) ([]string, er
 			return nil, errors.New("malformed peers data")
 		}
 
+		// TODO: bug
 		port := binary.BigEndian.Uint16(p[4:6])
 		addr := fmt.Sprintf("%d.%d.%d.%d:%d", p[0], p[1], p[2], p[3], port)
 		peers = append(peers, addr)
@@ -177,6 +177,25 @@ func getPeerID() ([20]byte, error) {
 		return buf, err
 	}
 	return buf, nil
+}
+
+type Handshake struct {
+	Pstrlen   int      `bencode:"pstrlen"`
+	Pstr      string   `bencode:"pstrlen"`
+	Reserverd [8]byte  `bencode:"reserved"`
+	InfoHash  [20]byte `bencode:"info_hash"`
+	PeerID    [20]byte `bencode:"peer_id"`
+}
+
+func (hs *Handshake) Bytes() []byte {
+	buf := make([]byte, 48+len(hs.Pstr))
+	buf[0] = byte(len(hs.Pstr))
+	curr := 1
+	curr += copy(buf[curr:], []byte(hs.Pstr))
+	curr += copy(buf[curr:], hs.Reserverd[:])
+	curr += copy(buf[curr:], hs.InfoHash[:])
+	curr += copy(buf[curr:], hs.PeerID[:])
+	return buf
 }
 
 func main() {
@@ -217,38 +236,20 @@ func main() {
 		log.Fatal(err)
 	}
 
-	for _, peer := range peers {
-		fmt.Println(peer)
+	fmt.Println(peers)
 
-		conn, err := net.DialTimeout("tcp", peer, time.Second*5)
-		if err != nil {
-			log.Fatal(err)
-		}
+	// for _, peer := range peers {
+	// 	fmt.Println(peer)
 
-		_, err = conn.Write(handshake)
-		if err != nil {
-			fmt.Println("failed to write handshake")
-			continue
-		}
+	// 	conn, err := net.DialTimeout("tcp", peer, time.Second*5)
+	// 	if err != nil {
+	// 		log.Fatal(err)
+	// 	}
 
-	}
-}
-
-type Handshake struct {
-	Pstrlen   int      `bencode:"pstrlen"`
-	Pstr      string   `bencode:"pstrlen"`
-	Reserverd [8]byte  `bencode:"reserved"`
-	InfoHash  [20]byte `bencode:"info_hash"`
-	PeerID    [20]byte `bencode:"peer_id"`
-}
-
-func (hs *Handshake) Bytes() []byte {
-	buf := make([]byte, 48+len(hs.Pstr))
-	buf[0] = byte(len(hs.Pstr))
-	curr := 1
-	curr += copy(buf[curr:], []byte(hs.Pstr))
-	curr += copy(buf[curr:], hs.Reserverd[:])
-	curr += copy(buf[curr:], hs.InfoHash[:])
-	curr += copy(buf[curr:], hs.PeerID[:])
-	return buf
+	// 	_, err = conn.Write(handshake)
+	// 	if err != nil {
+	// 		fmt.Println("failed to write handshake")
+	// 		continue
+	// 	}
+	// }
 }

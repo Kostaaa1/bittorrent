@@ -222,18 +222,19 @@ func decodeInto(dst reflect.Value, data interface{}) error {
 	case reflect.Slice:
 		if dst.Type().Elem().Kind() == reflect.Uint8 {
 			v := reflect.ValueOf(data)
-
-			if v.IsNil() {
-				return errors.New("data is nil")
-			}
+			// if v.IsNil() {
+			// 	return errors.New("data is nil")
+			// }
 			if v.Kind() != reflect.String {
 				return fmt.Errorf("")
 			}
 			if !v.Type().ConvertibleTo(t) {
 				return fmt.Errorf("")
 			}
+			dst.Set(v.Convert(dst.Type()))
+			return nil
+			// dst.Set(dst.Convert(v.Type()))
 		}
-
 		return decodeIntoSlice(dst, data)
 	case reflect.Map:
 		return decodeIntoMap(dst, data)
@@ -270,8 +271,6 @@ func decodeIntoMap(dst reflect.Value, data interface{}) error {
 	for k, v := range mapped {
 		keyVal := reflect.ValueOf(k).Convert(dst.Type().Key())
 		valVal := reflect.New(dst.Type().Elem()).Elem()
-		fmt.Println(valVal, valVal.Type(), valVal.Kind())
-
 		if err := decodeInto(valVal, v); err != nil {
 			return err
 		}
