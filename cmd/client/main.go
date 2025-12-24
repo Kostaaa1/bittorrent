@@ -28,8 +28,8 @@ type TorrentFile struct {
 }
 
 type bencodeTorrent struct {
-	Announce string      `bencode:"announce"`
-	Info     bencodeInfo `bencode:"info"`
+	Announce string       `bencode:"announce"`
+	Info     *bencodeInfo `bencode:"info"`
 }
 
 type bencodeInfo struct {
@@ -99,8 +99,11 @@ type TrackerResponse struct {
 	TrackerID      string `bencode:"tracker id"`
 	Complete       int    `bencode:"complete"`
 	Incomplete     int    `bencode:"incomplete"`
-	Peers          []byte `bencode:"peers"`
-	Peers6         string `bencode:"peers6"`
+	// Peers          []interface{} `bencode:"peers"`
+	// Peers  []map[string]interface{} `bencode:"peers"`
+	Peers []byte `bencode:"peers"`
+	// Peers  []bencodePeer `bencode:"peers"`
+	Peers6 string `bencode:"peers6"`
 }
 
 func (tf *TorrentFile) buildHttpTrackerURL(peerID [20]byte, port uint16) (*url.URL, error) {

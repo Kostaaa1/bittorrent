@@ -67,15 +67,12 @@ func (e *encoder) writeMap(v reflect.Value) error {
 		if elem.Kind() == reflect.Interface || elem.Kind() == reflect.Ptr {
 			elem = elem.Elem()
 		}
-
 		if key.Kind() != reflect.String {
 			return ErrDictKeyNotString
 		}
-
 		if err := e.writeStr(key.String()); err != nil {
 			return err
 		}
-
 		if err := e.encode(elem); err != nil {
 			return err
 		}
