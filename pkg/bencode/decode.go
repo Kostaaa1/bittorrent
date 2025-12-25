@@ -220,20 +220,19 @@ func decodeInto(dst reflect.Value, data interface{}) error {
 	case reflect.Struct:
 		return decodeIntoStruct(dst, data)
 	case reflect.Slice:
-		if dst.Type().Elem().Kind() == reflect.Uint8 {
+		if t.Elem().Kind() == reflect.Uint8 {
 			v := reflect.ValueOf(data)
 			// if v.IsNil() {
 			// 	return errors.New("data is nil")
 			// }
 			if v.Kind() != reflect.String {
-				return fmt.Errorf("")
+				return fmt.Errorf("only strings are convirtible to []byte")
 			}
 			if !v.Type().ConvertibleTo(t) {
-				return fmt.Errorf("")
+				return fmt.Errorf("not convertible")
 			}
-			dst.Set(v.Convert(dst.Type()))
+			dst.Set(v.Convert(t))
 			return nil
-			// dst.Set(dst.Convert(v.Type()))
 		}
 		return decodeIntoSlice(dst, data)
 	case reflect.Map:
