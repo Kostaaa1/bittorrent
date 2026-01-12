@@ -96,6 +96,7 @@ func (bto *bencodeTorrent) toTorrentFile() (*TorrentFile, error) {
 	}
 
 	files := make([]File, len(bto.Info.Files))
+
 	for i, f := range bto.Info.Files {
 		path := filepath.Join(append([]string{bto.Info.Name}, f.Path...)...)
 		files[i] = File{

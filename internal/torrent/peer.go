@@ -70,14 +70,18 @@ func (p *Peer) runPipeline() {
 	currPiece := 0
 	currOffset := 0
 
+	// TODO: temporary
+	done := false
+
 	for {
-		if p.canRequest() {
+		if !done && p.canRequest() {
 			<-p.pipeline.reqSignal
 
 			if currOffset == lastBlockID {
 				if currPiece == lastPieceID {
 					remainder := int(p.writer.totalLength) - currOffset - (lastPieceID * p.writer.pieceLength)
 					p.sendRequest(currPiece, currOffset, remainder)
+					done = true
 				} else {
 					p.sendRequest(currPiece, currOffset, p.writer.blockSize)
 					currPiece += 1

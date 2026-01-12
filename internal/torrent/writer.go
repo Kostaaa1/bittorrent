@@ -143,8 +143,7 @@ func (pm *PieceWriter) Start() error {
 
 func (w *PieceWriter) WritePiece(pieceIndex int, piece []byte) (int, error) {
 	entry := w.files[w.currID]
-	blockSize := int64(w.blockSize)
-	pieceOffset := int64(pieceIndex)*blockSize - entry.StartOffset
+	pieceOffset := int64(pieceIndex)*32768 - entry.StartOffset
 
 	if entry.file == nil {
 		if err := os.MkdirAll(filepath.Dir(entry.Path), 0755); err != nil {
@@ -157,8 +156,11 @@ func (w *PieceWriter) WritePiece(pieceIndex int, piece []byte) (int, error) {
 		entry.file = f
 	}
 
+	fmt.Println("WRITING PIECE:", entry.Path, pieceOffset, len(piece))
+
 	// check if next piece is overlapped, belongs to multiple files
-	if pieceOffset+blockSize > entry.EndOffset {
+	if pieceOffset+32768 > entry.EndOffset {
+		fmt.Println("OVEFLOW")
 		diff := entry.EndOffset - pieceOffset
 		start := piece[:diff]
 		end := piece[diff:]
