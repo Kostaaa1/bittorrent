@@ -59,7 +59,6 @@ func (i bencodeInfo) hash() ([20]byte, error) {
 	if err != nil {
 		return [20]byte{}, err
 	}
-	// fmt.Println("called", string(buf))
 	return sha1.Sum(buf), nil
 }
 

@@ -70,10 +70,10 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 	// peer := Peer{IP: "91.193.6.186", Port: 48274}
 	// peer := Peer{IP: "136.62.0.15", Port: 17604}
 	// peer := Peer{IP: "198.54.134.252", Port: 11341 }
-	peer := Peer{IP: "204.8.98.45", Port: 32030}
+	// peer := Peer{IP: "204.8.98.45", Port: 32030}
 	// peer := Peer{IP: "185.18.148.138", Port: 51413}
 	// peer := Peer{IP: "86.83.93.76", Port: 6881}
-	// peer := Peer{IP: "216.81.9.154", Port: 47980}
+	peer := Peer{IP: "216.81.9.154", Port: 47980}
 	if err := peer.DialWithHandshake(hs, tf); err != nil {
 		fmt.Println("handshake error:", err)
 		return err

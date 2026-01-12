@@ -29,36 +29,34 @@ func (p *Peer) sendUninterested() error {
 	p.amInterested = false
 	return p.writeMsg(Message{ID: MsgUninterested})
 }
-func (p *Peer) sendRequest(index, begin int) error {
+func (p *Peer) sendHave() error {
+	// return p.writeMsg(Message{ID: MsgHave, Payload: []byte()})
+	return nil
+}
+func (p *Peer) sendRequest(index, begin, block int) error {
 	// TODO: before requesting, we need to ask the peer if it has that piece
-	fmt.Println("[REQUEST] request piece:", index, begin, p.pieceWorker.blockSize)
-	payload := FormatRequest(index, begin, p.pieceWorker.blockSize)
+	fmt.Println("[REQUEST] request piece:", index, begin, block)
+	payload := FormatRequest(index, begin, block)
 	return p.writeMsg(Message{ID: MsgRequest, Payload: payload})
 }
 
 type Peer struct {
-	PeerID string `bencode:"peer id"`
-	IP     string `bencode:"ip"`
-	Port   uint16 `bencode:"port"`
-
-	conn     net.Conn
-	bitfield []byte
-
-	// Peer State
+	PeerID         string `bencode:"peer id"`
+	IP             string `bencode:"ip"`
+	Port           uint16 `bencode:"port"`
+	conn           net.Conn
+	bitfield       []byte
 	amChoking      bool
 	amInterested   bool
 	peerChoking    bool
 	peerInterested bool
-
-	pieceWorker *PieceWorker
-	pipeline    *requestPipeline
+	writer         *PieceWriter
+	pipeline       *requestPipeline
 }
 
 type requestPipeline struct {
-	pieceIndex int
 	reqSignal  chan struct{}
 	windowSize int
-	block      int
 }
 
 func (p *Peer) runPipeline() {
@@ -66,20 +64,28 @@ func (p *Peer) runPipeline() {
 		p.pipeline.reqSignal <- struct{}{}
 	}
 
-	pieceIndex := 0
-	offset := 0
-	lastBlock := p.pieceWorker.pieceLength - p.pieceWorker.blockSize
+	lastPieceID := p.writer.numOfPieces - 1
+	lastBlockID := p.writer.pieceLength - p.writer.blockSize
+
+	currPiece := 0
+	currOffset := 0
 
 	for {
 		if p.canRequest() {
 			<-p.pipeline.reqSignal
-			p.sendRequest(pieceIndex, offset)
 
-			if offset == lastBlock {
-				pieceIndex += 1
-				offset = 0
+			if currOffset == lastBlockID {
+				if currPiece == lastPieceID {
+					remainder := int(p.writer.totalLength) - currOffset - (lastPieceID * p.writer.pieceLength)
+					p.sendRequest(currPiece, currOffset, remainder)
+				} else {
+					p.sendRequest(currPiece, currOffset, p.writer.blockSize)
+					currPiece += 1
+					currOffset = 0
+				}
 			} else {
-				offset += p.pieceWorker.blockSize
+				p.sendRequest(currPiece, currOffset, p.writer.blockSize)
+				currOffset += p.writer.blockSize
 			}
 		}
 	}
@@ -129,10 +135,10 @@ func (p *Peer) readMessages() error {
 			fmt.Println("[MESSAGE] request")
 			p.bitfield = msg.Payload
 		case MsgPiece:
-			p.pipeline.reqSignal <- struct{}{}
 			piece := ParsePieceMessage(msg.Payload)
-			p.pieceWorker.worker <- piece
 			fmt.Printf("[PIECE] index %d, begin %d, blocks %d\n", piece.index, piece.begin, len(piece.block))
+			p.pipeline.reqSignal <- struct{}{}
+			p.writer.worker <- piece
 		case MsgHave:
 			fmt.Println("[MESSAGE] have")
 		case MsgCancel:
@@ -176,10 +182,9 @@ func (peer *Peer) DialWithHandshake(hs *Handshake, tf *TorrentFile) error {
 
 	peer.amInterested = false
 	peer.peerChoking = true
-	peer.pieceWorker = NewPieceWorker(3, tf.Pieces, tf.Files, tf.PieceLength)
+	peer.writer = NewPieceWriter(3, tf.Pieces, tf.Files, tf.TotalLength, tf.PieceLength, len(tf.Pieces))
+
 	peer.pipeline = &requestPipeline{
-		pieceIndex: 0,
-		block:      0,
 		windowSize: 4,
 		reqSignal:  make(chan struct{}, 4),
 	}
@@ -189,7 +194,7 @@ func (peer *Peer) DialWithHandshake(hs *Handshake, tf *TorrentFile) error {
 	}
 
 	go peer.runPipeline()
-	go peer.pieceWorker.Start()
+	go peer.writer.Start()
 
 	return peer.readMessages()
 }
