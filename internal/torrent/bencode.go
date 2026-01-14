@@ -25,26 +25,26 @@ type bencodeTorrent struct {
 }
 
 type bencodeFile struct {
-	Length int64    `bencode:"length"`
+	Length int      `bencode:"length"`
 	Path   []string `bencode:"path"`
 }
 
 type bencodeInfo struct {
 	Name        string        `bencode:"name"`
-	Length      *int64        `bencode:"length,omitempty"`
+	Length      *int          `bencode:"length,omitempty"`
 	Files       []bencodeFile `bencode:"files,omitempty"`
 	PieceLength int           `bencode:"piece length"`
 	Pieces      string        `bencode:"pieces"`
 	Private     int           `bencode:"private"`
 }
 
-func (i bencodeInfo) totalLength() (int64, error) {
+func (i bencodeInfo) totalLength() (int, error) {
 	if i.Length != nil {
 		return *i.Length, nil
 	}
 
 	if len(i.Files) > 0 {
-		var length int64
+		length := 0
 		for _, f := range i.Files {
 			length += f.Length
 		}

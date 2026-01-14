@@ -66,7 +66,6 @@ func (p *Peer) runPipeline() {
 
 	lastPieceID := p.writer.numOfPieces - 1
 	lastBlockID := p.writer.pieceLength - p.writer.blockSize
-
 	currPiece := 0
 	currOffset := 0
 
@@ -79,7 +78,7 @@ func (p *Peer) runPipeline() {
 
 			if currOffset == lastBlockID {
 				if currPiece == lastPieceID {
-					remainder := int(p.writer.totalLength) - currOffset - (lastPieceID * p.writer.pieceLength)
+					remainder := p.writer.totalLength - currOffset - (lastPieceID * p.writer.pieceLength)
 					p.sendRequest(currPiece, currOffset, remainder)
 					done = true
 				} else {

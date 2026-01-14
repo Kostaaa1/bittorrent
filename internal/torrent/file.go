@@ -13,11 +13,11 @@ import (
 type File struct {
 	W        *os.File
 	FullPath string
-	Length   int64
+	Length   int
 }
 
 type TorrentFile struct {
-	TotalLength int64
+	TotalLength int
 	PieceLength int
 	Announce    string
 	Files       []File
@@ -74,6 +74,7 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 	// peer := Peer{IP: "185.18.148.138", Port: 51413}
 	// peer := Peer{IP: "86.83.93.76", Port: 6881}
 	peer := Peer{IP: "216.81.9.154", Port: 47980}
+
 	if err := peer.DialWithHandshake(hs, tf); err != nil {
 		fmt.Println("handshake error:", err)
 		return err

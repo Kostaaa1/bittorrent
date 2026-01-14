@@ -31,9 +31,9 @@ func (p *piece) writeBlock(begin int, block []byte) {
 type FileEntry struct {
 	file        *os.File
 	Path        string
-	Length      int64
-	StartOffset int64
-	EndOffset   int64
+	Length      int
+	StartOffset int
+	EndOffset   int
 }
 
 type PieceWriter struct {
@@ -41,7 +41,7 @@ type PieceWriter struct {
 	numWorkers        int
 	numBlocksPerPiece int
 	numOfPieces       int
-	totalLength       int64
+	totalLength       int
 	blockSize         int
 	pieceLength       int
 	worker            chan PieceMessage
@@ -54,14 +54,15 @@ func NewPieceWriter(
 	workers int,
 	hashedPieces [][20]byte,
 	paths []File,
-	totalLength int64,
+	totalLength int,
 	pieceLength int,
 	numOfPieces int,
 ) *PieceWriter {
 	blockSize := int(math.Pow(2, 14))
 
 	files := make([]*FileEntry, len(paths))
-	var start, end int64
+
+	var start, end int
 	for i, path := range paths {
 		end += path.Length
 		files[i] = &FileEntry{
@@ -91,7 +92,7 @@ func NewPieceWriter(
 func (pm *PieceWriter) pieceSize(pieceIndex int) int {
 	// need to calculate the size for last piece
 	if pieceIndex == pm.numOfPieces-1 {
-		return int(pm.totalLength) - ((pm.numOfPieces - 1) * pm.pieceLength)
+		return pm.totalLength - ((pm.numOfPieces - 1) * pm.pieceLength)
 	}
 	return pm.pieceLength
 }
@@ -143,7 +144,7 @@ func (pm *PieceWriter) Start() error {
 
 func (w *PieceWriter) WritePiece(pieceIndex int, piece []byte) (int, error) {
 	entry := w.files[w.currID]
-	pieceOffset := int64(pieceIndex)*32768 - entry.StartOffset
+	pieceOffset := pieceIndex*w.pieceLength - entry.StartOffset
 
 	if entry.file == nil {
 		if err := os.MkdirAll(filepath.Dir(entry.Path), 0755); err != nil {
@@ -159,13 +160,13 @@ func (w *PieceWriter) WritePiece(pieceIndex int, piece []byte) (int, error) {
 	fmt.Println("WRITING PIECE:", entry.Path, pieceOffset, len(piece))
 
 	// check if next piece is overlapped, belongs to multiple files
-	if pieceOffset+32768 > entry.EndOffset {
+	if pieceOffset+w.pieceLength > entry.EndOffset {
 		fmt.Println("OVEFLOW")
 		diff := entry.EndOffset - pieceOffset
 		start := piece[:diff]
 		end := piece[diff:]
 
-		startN, err := entry.file.WriteAt(start, pieceOffset)
+		startN, err := entry.file.WriteAt(start, int64(pieceOffset))
 		if err != nil {
 			log.Fatal("failed to writeAt", entry.Path, err)
 		}
@@ -189,7 +190,7 @@ func (w *PieceWriter) WritePiece(pieceIndex int, piece []byte) (int, error) {
 
 		return startN + endN, nil
 	} else {
-		n, err := entry.file.WriteAt(piece, pieceOffset)
+		n, err := entry.file.WriteAt(piece, int64(pieceOffset))
 		if err != nil {
 			return 0, err
 		}

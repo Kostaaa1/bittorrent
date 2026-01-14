@@ -23,7 +23,7 @@ func NewDecoder(r io.Reader) *Decoder {
 func (d *Decoder) readIntBytes(delim byte) (int, error) {
 	n := 0
 	sign := 1
-	seenDigit := false
+	seen := false
 
 	for {
 		b, err := d.r.ReadByte()
@@ -51,11 +51,11 @@ func (d *Decoder) readIntBytes(delim byte) (int, error) {
 
 		if b == '-' {
 			sign = -1
-			if seenDigit && sign == -1 {
+			if seen && sign == -1 {
 				return 0, ErrInvalidIntegerFormat
 			}
 		}
-		if seenDigit && (b == '-' || n == 0) {
+		if seen && (b == '-' || n == 0) {
 			return 0, ErrInvalidIntegerFormat
 		}
 		if sign == -1 && b == '0' {
@@ -64,7 +64,7 @@ func (d *Decoder) readIntBytes(delim byte) (int, error) {
 
 		if !isNaN {
 			n = n*10 + int(b-'0')
-			seenDigit = true
+			seen = true
 		}
 	}
 }
@@ -88,6 +88,7 @@ func (d *Decoder) readString() (string, error) {
 	}
 
 	str := make([]byte, intN)
+
 	_, err = io.ReadFull(d.r, str)
 	if err != nil {
 		return "", err
