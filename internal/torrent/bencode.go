@@ -3,6 +3,7 @@ package torrent
 import (
 	"crypto/sha1"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"test/pkg/bencode"
 )
@@ -36,6 +37,16 @@ type bencodeInfo struct {
 	PieceLength int           `bencode:"piece length"`
 	Pieces      string        `bencode:"pieces"`
 	Private     int           `bencode:"private"`
+}
+
+type bencodePeer struct {
+	PeerID string `bencode:"peer id"`
+	IP     string `bencode:"ip"`
+	Port   uint16 `bencode:"port"`
+}
+
+func (p *bencodePeer) ip4addr() string {
+	return fmt.Sprintf("%s:%d", p.IP, p.Port)
 }
 
 func (i bencodeInfo) totalLength() (int, error) {
@@ -79,6 +90,28 @@ func (info *bencodeInfo) readPieces() ([][20]byte, error) {
 	return pieces, nil
 }
 
+func (bto *bencodeTorrent) prepareFileEntries() []*FileEntry {
+	files := make([]*FileEntry, len(bto.Info.Files))
+	var start, end int
+
+	for i, file := range bto.Info.Files {
+		end += file.Length
+
+		name := append([]string{bto.Info.Name}, file.Path...)
+		fullPath := filepath.Join(name...)
+
+		files[i] = &FileEntry{
+			Length:      file.Length,
+			FullPath:    fullPath,
+			StartOffset: start,
+			EndOffset:   end,
+		}
+		start += file.Length
+	}
+
+	return files
+}
+
 func (bto *bencodeTorrent) toTorrentFile() (*TorrentFile, error) {
 	pieces, err := bto.Info.readPieces()
 	if err != nil {
@@ -95,16 +128,6 @@ func (bto *bencodeTorrent) toTorrentFile() (*TorrentFile, error) {
 		return nil, err
 	}
 
-	files := make([]File, len(bto.Info.Files))
-
-	for i, f := range bto.Info.Files {
-		path := filepath.Join(append([]string{bto.Info.Name}, f.Path...)...)
-		files[i] = File{
-			FullPath: path,
-			Length:   f.Length,
-		}
-	}
-
 	return &TorrentFile{
 		Announce:    bto.Announce,
 		Name:        bto.Info.Name,
@@ -112,6 +135,6 @@ func (bto *bencodeTorrent) toTorrentFile() (*TorrentFile, error) {
 		PieceLength: bto.Info.PieceLength,
 		InfoHash:    hash,
 		Pieces:      pieces,
-		Files:       files,
+		Files:       bto.prepareFileEntries(),
 	}, nil
 }

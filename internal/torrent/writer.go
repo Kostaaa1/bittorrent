@@ -4,7 +4,6 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"log"
-	"math"
 	"os"
 	"path/filepath"
 )
@@ -28,71 +27,25 @@ func (p *piece) writeBlock(begin int, block []byte) {
 	p.blockCount++
 }
 
-type FileEntry struct {
-	file        *os.File
-	Path        string
-	Length      int
-	StartOffset int
-	EndOffset   int
-}
-
 type PieceWriter struct {
-	hashedPieces      [][20]byte
-	numWorkers        int
+	hashedPieces [][20]byte
+	numWorkers   int
+
 	numBlocksPerPiece int
-	numOfPieces       int
 	totalLength       int
-	blockSize         int
 	pieceLength       int
-	worker            chan PieceMessage
-	pieces            map[int]*piece
-	files             []*FileEntry
-	currID            int
-}
+	blockSize         int
 
-func NewPieceWriter(
-	workers int,
-	hashedPieces [][20]byte,
-	paths []File,
-	totalLength int,
-	pieceLength int,
-	numOfPieces int,
-) *PieceWriter {
-	blockSize := int(math.Pow(2, 14))
-
-	files := make([]*FileEntry, len(paths))
-
-	var start, end int
-	for i, path := range paths {
-		end += path.Length
-		files[i] = &FileEntry{
-			Length:      path.Length,
-			Path:        path.FullPath,
-			StartOffset: start,
-			EndOffset:   end,
-		}
-		start += path.Length
-	}
-
-	return &PieceWriter{
-		numOfPieces:       numOfPieces,
-		totalLength:       totalLength,
-		pieceLength:       pieceLength,
-		hashedPieces:      hashedPieces,
-		numWorkers:        workers,
-		worker:            make(chan PieceMessage),
-		pieces:            make(map[int]*piece),
-		blockSize:         blockSize,
-		numBlocksPerPiece: pieceLength / blockSize,
-		files:             files,
-		currID:            0,
-	}
+	worker chan PieceMessage
+	pieces map[int]*piece
+	files  []*FileEntry
+	currID int
 }
 
 func (pm *PieceWriter) pieceSize(pieceIndex int) int {
-	// need to calculate the size for last piece
-	if pieceIndex == pm.numOfPieces-1 {
-		return pm.totalLength - ((pm.numOfPieces - 1) * pm.pieceLength)
+	lastPiece := len(pm.hashedPieces) - 1
+	if pieceIndex == lastPiece {
+		return pm.totalLength - (lastPiece * pm.pieceLength)
 	}
 	return pm.pieceLength
 }
@@ -101,7 +54,6 @@ func (pm *PieceWriter) findOrAssignPiece(pieceIndex int) *piece {
 	if block, ok := pm.pieces[pieceIndex]; ok {
 		return block
 	}
-
 	size := pm.pieceSize(pieceIndex)
 
 	pm.pieces[pieceIndex] = &piece{
@@ -117,6 +69,8 @@ func (pm *PieceWriter) Start() error {
 		piece := pm.findOrAssignPiece(msg.index)
 		piece.writeBlock(msg.begin, msg.block)
 
+		fmt.Println("received piece:", msg.index, msg.begin, len(msg.block), piece.blockCount, pm.numBlocksPerPiece)
+
 		// NOTE: revisit this and possibly find better way of veyfing if its the last block that is missing.
 		if piece.blockCount == pm.numBlocksPerPiece {
 			// TODO: need to notify the network layer if verification succeeds or fails. USE SEPARATE CHANNEL
@@ -129,7 +83,7 @@ func (pm *PieceWriter) Start() error {
 				len(msg.block),
 			)
 
-			// What if writing of the piece fails, how to recover?
+			// NOTE: What if writing of the piece fails, how to recover?
 			_, err := pm.WritePiece(msg.index, piece.buffer)
 			if err != nil {
 				fmt.Println("failed to write piece buffer to file:", err)
@@ -147,45 +101,42 @@ func (w *PieceWriter) WritePiece(pieceIndex int, piece []byte) (int, error) {
 	pieceOffset := pieceIndex*w.pieceLength - entry.StartOffset
 
 	if entry.file == nil {
-		if err := os.MkdirAll(filepath.Dir(entry.Path), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(entry.FullPath), 0755); err != nil {
 			fmt.Println("Failed to os.Mkdirall", err)
 		}
-		f, err := os.OpenFile(entry.Path, os.O_CREATE|os.O_WRONLY, 0644)
+		f, err := os.OpenFile(entry.FullPath, os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			return 0, err
 		}
 		entry.file = f
 	}
 
-	fmt.Println("WRITING PIECE:", entry.Path, pieceOffset, len(piece))
+	overlap := pieceOffset+w.pieceLength > entry.EndOffset
 
-	// check if next piece is overlapped, belongs to multiple files
-	if pieceOffset+w.pieceLength > entry.EndOffset {
-		fmt.Println("OVEFLOW")
+	if overlap {
 		diff := entry.EndOffset - pieceOffset
 		start := piece[:diff]
 		end := piece[diff:]
 
 		startN, err := entry.file.WriteAt(start, int64(pieceOffset))
 		if err != nil {
-			log.Fatal("failed to writeAt", entry.Path, err)
+			log.Fatal("failed to writeAt", entry.FullPath, err)
 		}
 
 		// TODO: BUG:
 		// CHECK OFFSET LENGTH!
-		// WRITE OFFSET TO DIFFERENT FILES UNTIL THE END
 		w.currID++
 		entry = w.files[w.currID]
 
-		f, err := os.OpenFile(entry.Path, os.O_CREATE|os.O_WRONLY, 0644)
+		f, err := os.OpenFile(entry.FullPath, os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
-			log.Fatal("failed to openFile", entry.Path, err)
+			log.Fatal("failed to openFile", entry.FullPath, err)
 		}
 		entry.file = f
 
 		endN, err := entry.file.Write(end)
 		if err != nil {
-			log.Fatal("failed to writeAt", entry.Path, err)
+			log.Fatal("failed to writeAt", entry.FullPath, err)
 		}
 
 		return startN + endN, nil
