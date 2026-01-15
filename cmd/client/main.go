@@ -16,7 +16,7 @@ func getClientID() ([20]byte, error) {
 }
 
 func main() {
-	tf, err := torrent.NewFile("file5.torrent")
+	tf, err := torrent.NewFile("test_torrents/file5.torrent")
 	if err != nil {
 		log.Fatal(err)
 	}
