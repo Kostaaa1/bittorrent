@@ -28,81 +28,87 @@ func (p *piece) writeBlock(begin int, block []byte) {
 }
 
 type PieceWriter struct {
-	hashedPieces [][20]byte
-	numWorkers   int
-
+	hashedPieces      [][20]byte
+	numWorkers        int
 	numBlocksPerPiece int
 	totalLength       int
 	pieceLength       int
 	blockSize         int
-
-	worker chan PieceMessage
-	pieces map[int]*piece
-	files  []*FileEntry
-	currID int
+	worker            chan PieceMessage
+	pieces            map[int]*piece
+	files             []*FileEntry
 }
 
-func (pm *PieceWriter) pieceSize(pieceIndex int) int {
-	lastPiece := len(pm.hashedPieces) - 1
+func (pw *PieceWriter) pieceSize(pieceIndex int) int {
+	lastPiece := len(pw.hashedPieces) - 1
 	if pieceIndex == lastPiece {
-		return pm.totalLength - (lastPiece * pm.pieceLength)
+		return pw.totalLength - (lastPiece * pw.pieceLength)
 	}
-	return pm.pieceLength
+	return pw.pieceLength
 }
 
-func (pm *PieceWriter) findOrAssignPiece(pieceIndex int) *piece {
-	if block, ok := pm.pieces[pieceIndex]; ok {
+func (pw *PieceWriter) findOrAssignPiece(pieceIndex int) *piece {
+	if block, ok := pw.pieces[pieceIndex]; ok {
 		return block
 	}
-	size := pm.pieceSize(pieceIndex)
+	size := pw.pieceSize(pieceIndex)
 
-	pm.pieces[pieceIndex] = &piece{
+	pw.pieces[pieceIndex] = &piece{
 		blockCount: 0,
 		buffer:     make([]byte, size),
 	}
 
-	return pm.pieces[pieceIndex]
+	return pw.pieces[pieceIndex]
 }
 
-func (pm *PieceWriter) Start() error {
-	for msg := range pm.worker {
-		piece := pm.findOrAssignPiece(msg.index)
+func (pw *PieceWriter) Start() error {
+	for msg := range pw.worker {
+		piece := pw.findOrAssignPiece(msg.index)
 		piece.writeBlock(msg.begin, msg.block)
 
-		fmt.Println("received piece:", msg.index, msg.begin, len(msg.block), piece.blockCount, pm.numBlocksPerPiece)
-
 		// NOTE: revisit this and possibly find better way of veyfing if its the last block that is missing.
-		if piece.blockCount == pm.numBlocksPerPiece {
+		if piece.blockCount == pw.numBlocksPerPiece {
 			// TODO: need to notify the network layer if verification succeeds or fails. USE SEPARATE CHANNEL
-			if sha1.Sum(piece.buffer) != pm.hashedPieces[msg.index] {
+			if sha1.Sum(piece.buffer) != pw.hashedPieces[msg.index] {
 				return fmt.Errorf("hashes do not match for piece %d", msg.index)
 			}
 
-			fmt.Printf("[VERIFIED] Writing - piece: %d, block: %d\n",
-				msg.index,
-				len(msg.block),
-			)
+			fmt.Printf("[VERIFIED] Writing - piece: %d, block: %d\n", msg.index, len(msg.block))
 
 			// NOTE: What if writing of the piece fails, how to recover?
-			_, err := pm.WritePiece(msg.index, piece.buffer)
-			if err != nil {
+			if _, err := pw.WritePiece(msg.index, piece.buffer); err != nil {
 				fmt.Println("failed to write piece buffer to file:", err)
 				return err
 			}
-			delete(pm.pieces, msg.index)
+			delete(pw.pieces, msg.index)
 		}
 	}
 
 	return nil
 }
 
+func (w *PieceWriter) getFileEntry(pieceIndex int) (entry *FileEntry, id int, err error) {
+	offset := pieceIndex * w.pieceLength
+	for i, f := range w.files {
+		if offset <= f.EndOffset {
+			id = i
+			entry = f
+			return
+		}
+	}
+	err = fmt.Errorf("failed to find the file for piece index: %d", pieceIndex)
+	return
+}
+
 func (w *PieceWriter) WritePiece(pieceIndex int, piece []byte) (int, error) {
-	entry := w.files[w.currID]
-	pieceOffset := pieceIndex*w.pieceLength - entry.StartOffset
+	entry, fileID, err := w.getFileEntry(pieceIndex)
+	if err != nil {
+		return 0, err
+	}
 
 	if entry.file == nil {
 		if err := os.MkdirAll(filepath.Dir(entry.FullPath), 0755); err != nil {
-			fmt.Println("Failed to os.Mkdirall", err)
+			return 0, fmt.Errorf("Failed to os.Mkdirall: %v", err)
 		}
 		f, err := os.OpenFile(entry.FullPath, os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
@@ -111,40 +117,48 @@ func (w *PieceWriter) WritePiece(pieceIndex int, piece []byte) (int, error) {
 		entry.file = f
 	}
 
-	overlap := pieceOffset+w.pieceLength > entry.EndOffset
+	pieceOffset := pieceIndex * w.pieceLength
+	entryOffset := pieceOffset - entry.StartOffset
 
-	if overlap {
-		diff := entry.EndOffset - pieceOffset
+	if entryOffset+len(piece) > entry.Length {
+		diff := entry.Length - entryOffset
 		start := piece[:diff]
-		end := piece[diff:]
 
-		startN, err := entry.file.WriteAt(start, int64(pieceOffset))
+		remainder := piece[diff:]
+		remainderLen := len(remainder)
+
+		_, err := entry.file.WriteAt(start, int64(entryOffset))
 		if err != nil {
 			log.Fatal("failed to writeAt", entry.FullPath, err)
 		}
 
-		// TODO: BUG:
-		// CHECK OFFSET LENGTH!
-		w.currID++
-		entry = w.files[w.currID]
+		////////////////
+		// TODO: This still has bugs
+		// Write as long as remainder buffer can be written to file
+		for remainderLen > 0 {
+			fileID++
+			entry = w.files[fileID]
 
-		f, err := os.OpenFile(entry.FullPath, os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			log.Fatal("failed to openFile", entry.FullPath, err)
-		}
-		entry.file = f
+			f, err := os.OpenFile(entry.FullPath, os.O_CREATE|os.O_WRONLY, 0644)
+			if err != nil {
+				log.Fatal("failed to openFile", entry.FullPath, err)
+			}
+			entry.file = f
 
-		endN, err := entry.file.Write(end)
-		if err != nil {
-			log.Fatal("failed to writeAt", entry.FullPath, err)
+			remainderN, err := entry.file.WriteAt(remainder, 0)
+			if err != nil {
+				log.Fatal("failed to writeAt", entry.FullPath, err)
+			}
+			remainderLen -= remainderN
 		}
 
-		return startN + endN, nil
-	} else {
-		n, err := entry.file.WriteAt(piece, int64(pieceOffset))
-		if err != nil {
-			return 0, err
-		}
-		return n, nil
+		return len(piece), nil
 	}
+
+	n, err := entry.file.WriteAt(piece, int64(entryOffset))
+	if err != nil {
+		return 0, err
+	}
+
+	return n, nil
 }

@@ -74,7 +74,7 @@ func (peer *Peer) runPipeline() {
 
 	lastPieceID := peer.numOfPieces - 1
 	lastBlockID := peer.pieceLength - peer.blockSize
-	currPiece := 0
+	currPiece := 588
 	currOffset := 0
 
 	// TODO: temporary

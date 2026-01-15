@@ -101,6 +101,7 @@ func (bto *bencodeTorrent) prepareFileEntries() []*FileEntry {
 		fullPath := filepath.Join(name...)
 
 		files[i] = &FileEntry{
+			ID:          i,
 			Length:      file.Length,
 			FullPath:    fullPath,
 			StartOffset: start,

@@ -17,6 +17,7 @@ import (
 // }
 
 type FileEntry struct {
+	ID          int
 	file        *os.File
 	FullPath    string
 	Length      int
