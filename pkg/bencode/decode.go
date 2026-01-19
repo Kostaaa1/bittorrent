@@ -8,6 +8,8 @@ import (
 	"reflect"
 )
 
+// TODO:
+// need an option to accumilate bytes that are being read (needed for info hash), also need the way of freeing the memory of the bytes
 type Decoder struct {
 	r *bufio.Reader
 }
@@ -227,7 +229,7 @@ func decodeInto(dst reflect.Value, data interface{}) error {
 			// 	return errors.New("data is nil")
 			// }
 			if v.Kind() != reflect.String {
-				return fmt.Errorf("only strings are convirtible to []byte")
+				return fmt.Errorf("only strings are convertible to []byte")
 			}
 			if !v.Type().ConvertibleTo(t) {
 				return fmt.Errorf("not convertible")

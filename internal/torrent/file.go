@@ -2,6 +2,7 @@ package torrent
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -9,12 +10,6 @@ import (
 	"strconv"
 	"test/pkg/bencode"
 )
-
-// type File struct {
-// 	W        *os.File
-// 	FullPath string
-// 	Length   int
-// }
 
 type FileEntry struct {
 	ID          int
@@ -54,21 +49,28 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 	fmt.Println("Downloading file:")
 	fmt.Println("	- Name:", tf.Name)
 	fmt.Println("	- Files:", tf.Files)
+	fmt.Println("	- Info hash:", hex.EncodeToString(tf.InfoHash[:]))
 	fmt.Println("	- Length:", tf.TotalLength)
 	fmt.Println("	- PieceLength:", tf.PieceLength)
 	fmt.Println("	- Pieces:", len(tf.Pieces))
 
-	// peers, err := tf.discoverPeers(clientID, port)
-	// if err != nil {
-	// 	return err
-	// }
-	// fmt.Println(peers)
+	peers, err := tf.discoverPeers(clientID, port)
+	if err != nil {
+		return err
+	}
 
 	hs := &Handshake{
 		Pstr:      []byte("BitTorrent protocol"),
 		Reserverd: [8]byte{},
 		InfoHash:  tf.InfoHash,
 		PeerID:    clientID,
+	}
+
+	for _, peer := range peers {
+		if err := DialPeer(peer.ip4addr(), hs, tf); err != nil {
+			fmt.Printf("Peer dialing failed: peer=%s, error=%v\n", peer.ip4addr(), err)
+			continue
+		}
 	}
 
 	// peer := bencodePeer{IP: "185.203.56.65", Port: 55734 }
@@ -82,12 +84,12 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 	// peer := bencodePeer{IP: "204.8.98.45", Port: 32030}
 	// peer := bencodePeer{IP: "185.18.148.138", Port: 51413}
 	// peer := bencodePeer{IP: "86.83.93.76", Port: 6881}
-	peer := bencodePeer{IP: "216.81.9.154", Port: 47980}
+	// peer := bencodePeer{IP: "216.81.9.154", Port: 47980}
 
-	if err := DialPeer(peer.ip4addr(), hs, tf); err != nil {
-		fmt.Println("handshake error:", err)
-		return err
-	}
+	// if err := DialPeer(peer.ip4addr(), hs, tf); err != nil {
+	// 	fmt.Println("handshake error:", err)
+	// 	return err
+	// }
 
 	// var wg sync.WaitGroup
 	// for _, peer := range peers {
