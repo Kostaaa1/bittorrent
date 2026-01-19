@@ -2,7 +2,9 @@ package bencode
 
 import (
 	"bytes"
+	"fmt"
 	"io"
+	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -23,7 +25,6 @@ func run(t *testing.T, cases []testCase) {
 			t.Logf("Testing for input: %s\n", tc.input)
 
 			buf := bytes.NewBuffer([]byte(tc.input))
-
 			var data interface{}
 
 			err := NewDecoder(buf).Decode(&data)
@@ -174,6 +175,10 @@ func TestDecode_String(t *testing.T) {
 	})
 }
 
+type decodeDTO struct {
+	Name string `bencode:"name"`
+}
+
 func TestDecode_List(t *testing.T) {
 	run(t, []testCase{
 		{
@@ -243,4 +248,25 @@ func TestDecode_Dictionary(t *testing.T) {
 			},
 		},
 	})
+}
+
+type DTO struct {
+	Name string `bencode:"name"`
+}
+
+func TestDecode_Reflection(t *testing.T) {
+	t.Parallel()
+
+	var src DTO
+	want := DTO{Name: "alice"}
+
+	r := bytes.NewReader([]byte("d4:name5:alicee"))
+	err := NewDecoder(r).Decode(&src)
+
+	eq := reflect.DeepEqual(src, want)
+
+	fmt.Println("TEST RESULT:", src, want, eq)
+
+	require.NoError(t, err)
+	require.True(t, eq)
 }
