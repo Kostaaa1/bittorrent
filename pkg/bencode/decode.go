@@ -3,6 +3,7 @@ package bencode
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 )
@@ -78,7 +79,25 @@ func (d *Decoder) decodeInt(dst reflect.Value) error {
 		return err
 	}
 
-	_ = i
+	i64 := int64(i)
+	t := reflect.ValueOf(i)
+
+	if t.Type().ConvertibleTo(dst.Type()) {
+		switch dst.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			if dst.OverflowInt(i64) {
+				return fmt.Errorf("value=%d overflows target int type=%s", i64, dst.Type())
+			}
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+			if i64 < 0 || dst.OverflowUint(uint64(i64)) {
+				return fmt.Errorf("value=%d overflows target uint type=%s", i64, dst.Type())
+			}
+		}
+
+		converted := t.Convert(dst.Type())
+		dst.Set(converted)
+	}
+
 	return nil
 }
 
@@ -96,9 +115,7 @@ func (d *Decoder) decodeString(dst reflect.Value) error {
 	}
 
 	data := make([]byte, intN)
-
-	_, err = io.ReadFull(d.r, data)
-	if err != nil {
+	if _, err := io.ReadFull(d.r, data); err != nil {
 		return err
 	}
 
@@ -108,8 +125,23 @@ func (d *Decoder) decodeString(dst reflect.Value) error {
 }
 
 func (d *Decoder) decodeList(dst reflect.Value) error {
+	// 	conv, ok := data.([]interface{})
+	// 	if !ok {
+	// 		return errors.New("failed to decode into slice: data not slice")
+	// 	}
+
+	// 	s := reflect.MakeSlice(dst.Type(), len(conv), len(conv))
+
+	// 	for i := 0; i < s.Len(); i++ {
+	// 		if err := decodeInto(s.Index(i), conv[i]); err != nil {
+	// 			return err
+	// 		}
+	// 	}
+	// 	dst.Set(s)
+
 	d.r.ReadByte()
-	// list := make([]interface{}, 0)
+
+	// s := reflect.MakeSlice(dst.Type(), 0, 0)
 
 	for {
 		if err := d.peekConsumeEnd(); err != nil {
@@ -119,11 +151,13 @@ func (d *Decoder) decodeList(dst reflect.Value) error {
 			return err
 		}
 
-		if err := d.decode(dst); err != nil {
+		var v interface{}
+		if err := d.decode(reflect.ValueOf(&v).Elem()); err != nil {
 			return err
 		}
 
-		// list = append(list, v)
+		// reflect.AppendSlice(s, reflect.ValueOf(v))
+		fmt.Println("SLICE:", v)
 	}
 }
 
@@ -139,28 +173,36 @@ func (d *Decoder) peekConsumeEnd() error {
 	return nil
 }
 
-func (d *Decoder) decodeDict(dst reflect.Value) error {
+func (d *Decoder) decodeDictToMap(dst reflect.Value) error {
 	d.r.ReadByte()
+
+	m := reflect.MakeMap(dst.Type())
 
 	for {
 		if err := d.peekConsumeEnd(); err != nil {
 			if err == errEnd {
+				dst.Set(m)
 				return nil
 			}
 			return err
 		}
 
 		var key string
-		if err := d.decode(reflect.ValueOf(&key)); err != nil {
+		if err := d.decodeString(reflect.ValueOf(&key).Elem()); err != nil {
 			return err
 		}
 
 		if key == "" {
+			return fmt.Errorf("failed to decode dictionary: empty key")
 		}
 
-		if err := d.decode(dst); err != nil {
+		var value interface{}
+		v := reflect.ValueOf(&value).Elem()
+		if err := d.decode(v); err != nil {
 			return err
 		}
+
+		m.SetMapIndex(reflect.ValueOf(key), v)
 	}
 }
 
@@ -170,24 +212,57 @@ func (d *Decoder) decode(dst reflect.Value) error {
 		return err
 	}
 
-	kind := dst.Type().Kind()
-	if kind == reflect.Pointer {
+	if dst.Type().Kind() == reflect.Pointer {
 		dst = dst.Elem()
 	}
 
-	if kind == reflect.Interface {
-	}
+	fmt.Println("Decoding:", dst, dst.Type(), dst.Type().Kind())
 
+	// if kind == reflect.Interface {
 	switch b[0] {
 	case 'l':
-		return d.decodeList(dst)
+		var v []interface{}
+		if err := d.decodeList(reflect.ValueOf(&v).Elem()); err != nil {
+			return err
+		}
+		dst.Set(reflect.ValueOf(v))
+		return nil
 	case 'd':
-		return d.decodeDict(dst)
+		var v map[string]interface{}
+		if err := d.decodeDictToMap(reflect.ValueOf(&v).Elem()); err != nil {
+			return err
+		}
+		dst.Set(reflect.ValueOf(v))
+		return nil
 	case 'i':
-		return d.decodeInt(dst)
+		var v int
+		if err := d.decodeInt(reflect.ValueOf(&v).Elem()); err != nil {
+			return err
+		}
+		dst.Set(reflect.ValueOf(v))
+		return nil
 	default:
-		return d.decodeString(dst)
+		var value string
+		v := reflect.ValueOf(&value).Elem()
+		if err := d.decodeString(v); err != nil {
+			return err
+		}
+		dst.Set(v)
+		return nil
 	}
+	// }
+	//  else {
+	// 	switch b[0] {
+	// 	case 'l':
+	// 		return d.decodeList(dst)
+	// 	case 'd':
+	// 		return d.decodeDict(dst)
+	// 	case 'i':
+	// 		return d.decodeInt(dst)
+	// 	default:
+	// 		return d.decodeString(dst)
+	// 	}
+	// }
 }
 
 func (d *Decoder) Decode(src interface{}) error {
@@ -195,11 +270,13 @@ func (d *Decoder) Decode(src interface{}) error {
 		return errors.New("src needs to be a pointer")
 	}
 
-	if err := d.decode(reflect.ValueOf(src)); err != nil {
+	value := reflect.ValueOf(src)
+	if err := d.decode(value); err != nil {
 		return err
 	}
 
 	if d.r.Buffered() > 0 {
+		value.Elem().SetZero()
 		return ErrTrailingDataLeft
 	}
 
@@ -207,7 +284,6 @@ func (d *Decoder) Decode(src interface{}) error {
 }
 
 // func unmarshal(src, data interface{}) error {
-
 // 	return decodeInto(reflect.ValueOf(src).Elem(), data)
 // }
 

@@ -227,10 +227,18 @@ func TestDecode_Dictionary(t *testing.T) {
 		},
 		{
 			name:  "dictionary",
-			input: "di32e7:versioni5ee",
-			want:  nil,
-			err:   ErrDictKeyNotString,
+			input: "d6:client11:ArchTorrent7:version5:alicee",
+			want: map[string]interface{}{
+				"client":  "ArchTorrent",
+				"version": "alice",
+			},
 		},
+		// {
+		// 	name:  "dictionary",
+		// 	input: "di32e7:versioni5ee",
+		// 	want:  nil,
+		// 	err:   ErrDictKeyNotString,
+		// },
 		{
 			name:  "dictionary: torrent example",
 			input: "d8:announce23:http://bt4.t-ru.org/ann13:announce-listll23:http://bt4.t-ru.org/annel31:http://retracker.local/announceee7:comment51:https://rutracker.org/forum/viewtopic.php?t=649613210:created by13:BitComet/2.0513:creation datei1709731450e8:encoding5:UTF-84:infod6:lengthi20028000e4:name52:Atkins Evan - GoLang for Machine Learning - 2024.PDF10:name.utf-852:Atkins Evan - GoLang for Machine Learning - 2024.PDF12:piece lengthi65536ee9:publisher13:rutracker.org13:publisher-url51:https://rutracker.org/forum/viewtopic.php?t=6496132e",
