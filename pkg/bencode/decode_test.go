@@ -24,17 +24,16 @@ func run[T any](t *testing.T, cases []testCase[T]) {
 
 			buf := bytes.NewBuffer([]byte(tc.input))
 
-			// var data interface{}
-			var data T
-			err := NewDecoder(buf).Decode(&data)
+			var got T
+			err := NewDecoder(buf).Decode(&got)
 
 			if tc.err != nil {
 				require.Error(t, err)
 				require.Equal(t, err, tc.err)
-				require.Zero(t, data)
+				require.Zero(t, got)
 			} else {
 				require.NoError(t, err)
-				require.True(t, reflect.DeepEqual(data, tc.want))
+				require.True(t, reflect.DeepEqual(got, tc.want))
 			}
 		})
 	}
@@ -203,7 +202,7 @@ func TestDecode_List(t *testing.T) {
 	})
 }
 
-func TestDecode_Dictionary(t *testing.T) {
+func TestDecode_DictionaryToMap(t *testing.T) {
 	run(t, []testCase[map[string]interface{}]{
 		{
 			name:  "dictionary: empty",
@@ -233,12 +232,12 @@ func TestDecode_Dictionary(t *testing.T) {
 				"version": "alice",
 			},
 		},
-		// {
-		// 	name:  "dictionary",
-		// 	input: "di32e7:versioni5ee",
-		// 	want:  nil,
-		// 	err:   ErrDictKeyNotString,
-		// },
+		{
+			name:  "dictionary",
+			input: "di32e7:versioni5ee",
+			want:  nil,
+			err:   ErrInvalidStringFormat,
+		},
 		{
 			name:  "dictionary: torrent example",
 			input: "d8:announce23:http://bt4.t-ru.org/ann13:announce-listll23:http://bt4.t-ru.org/annel31:http://retracker.local/announceee7:comment51:https://rutracker.org/forum/viewtopic.php?t=649613210:created by13:BitComet/2.0513:creation datei1709731450e8:encoding5:UTF-84:infod6:lengthi20028000e4:name52:Atkins Evan - GoLang for Machine Learning - 2024.PDF10:name.utf-852:Atkins Evan - GoLang for Machine Learning - 2024.PDF12:piece lengthi65536ee9:publisher13:rutracker.org13:publisher-url51:https://rutracker.org/forum/viewtopic.php?t=6496132e",
@@ -258,6 +257,64 @@ func TestDecode_Dictionary(t *testing.T) {
 				"publisher":     "rutracker.org",
 				"publisher-url": "https://rutracker.org/forum/viewtopic.php?t=6496132",
 			},
+		},
+	})
+}
+
+type Torrent struct {
+	Announce     string     `bencode:"announce"`
+	AnnounceList [][]string `bencode:"announce-list,omitempty"`
+	Comment      string     `bencode:"comment,omitempty"`
+	CreatedBy    string     `bencode:"created by,omitempty"`
+	CreationDate int64      `bencode:"creation date,omitempty"`
+	Encoding     string     `bencode:"encoding,omitempty"`
+	Info         InfoDict   `bencode:"info"`
+}
+
+type InfoDict struct {
+	Name        string     `bencode:"name"`
+	PieceLength int64      `bencode:"piece length"`
+	Pieces      []byte     `bencode:"pieces"`
+	Files       []FileInfo `bencode:"files,omitempty"`
+}
+
+type FileInfo struct {
+	Length int64    `bencode:"length"`
+	Path   []string `bencode:"path"`
+}
+
+func TestDecode_DictionaryToStruct(t *testing.T) {
+	run(t, []testCase[Torrent]{
+		{
+			name:  "struct",
+			input: "d8:announce13:http://testsy13:announce-listll13:http://testel13:http://backupee7:comment12:just a test10:created by9:unit-test13:creation datei1700000000e8:encoding5:UTF-84:infod4:name8:test.iso12:piece lengthi262144e6:pieces20:XXXXXXXXXXXXXXXXXXXX5:filesld6:lengthi12345e4:pathl4:test8:test.isoeed6:lengthi67890e4:pathl4:test9:extra.bineeeee",
+			want: Torrent{
+				Announce: "http://test",
+				AnnounceList: [][]string{
+					{"http://test"},
+					{"http://backup"},
+				},
+				Comment:      "just a test",
+				CreatedBy:    "unit-test",
+				CreationDate: 1700000000,
+				Encoding:     "UTF-8",
+				Info: InfoDict{
+					Name:        "test.iso",
+					PieceLength: 262144,
+					Pieces:      []byte("XXXXXXXXXXXXXXXXXXXX"),
+					Files: []FileInfo{
+						{
+							Length: 12345,
+							Path:   []string{"test", "test.iso"},
+						},
+						{
+							Length: 67890,
+							Path:   []string{"test", "extra.bin"},
+						},
+					},
+				},
+			},
+			err: nil,
 		},
 	})
 }

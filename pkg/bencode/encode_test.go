@@ -121,7 +121,7 @@ func TestBencode_Encode(t *testing.T) {
 		{
 			name:    "list: dictionary with non-string key (error)",
 			input:   []any{map[any]any{1: "a"}},
-			wantErr: ErrDictKeyNotString,
+			wantErr: ErrInvalidStringFormat,
 		},
 		{
 			name:    "dictionary: empty",
@@ -155,7 +155,7 @@ func TestBencode_Encode(t *testing.T) {
 		{
 			name:    "dictionary: non-string key",
 			input:   map[any]any{1: "a"},
-			wantErr: ErrDictKeyNotString,
+			wantErr: ErrInvalidStringFormat,
 		},
 	}
 
