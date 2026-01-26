@@ -69,9 +69,10 @@ func (d *Decoder) readIntBytes(delim byte) (int, error) {
 		if seen && (b == '-' || n == 0) {
 			return 0, ErrInvalidIntegerFormat
 		}
-		if sign == -1 && b == '0' {
-			return 0, ErrInvalidIntegerFormat
-		}
+
+		// if sign == -1 && b == '0' {
+		// 	return 0, ErrInvalidIntegerFormat
+		// }
 
 		if !isNaN {
 			n = n*10 + int(b-'0')
@@ -81,7 +82,10 @@ func (d *Decoder) readIntBytes(delim byte) (int, error) {
 }
 
 func (d *Decoder) decodeInt(dst reflect.Value) error {
-	d.r.ReadByte()
+	_, err := d.r.ReadByte()
+	if err != nil {
+		return err
+	}
 
 	i, err := d.readIntBytes('e')
 	if err != nil {
@@ -89,21 +93,26 @@ func (d *Decoder) decodeInt(dst reflect.Value) error {
 	}
 
 	i64 := int64(i)
-	t := reflect.ValueOf(i)
 
-	if t.Type().ConvertibleTo(dst.Type()) {
-		switch dst.Kind() {
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			if dst.OverflowInt(i64) {
-				return fmt.Errorf("value=%d overflows target int type=%s", i64, dst.Type())
-			}
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-			if i64 < 0 || dst.OverflowUint(uint64(i64)) {
-				return fmt.Errorf("value=%d overflows target uint type=%s", i64, dst.Type())
-			}
+	switch dst.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		if dst.OverflowInt(i64) {
+			return fmt.Errorf("value=%d overflows target int type=%s", i64, dst.Type())
 		}
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		if i64 < 0 || dst.OverflowUint(uint64(i64)) {
+			return fmt.Errorf("value=%d overflows target uint type=%s", i64, dst.Type())
+		}
+	}
 
-		dst.Set(t.Convert(dst.Type()))
+	v := reflect.ValueOf(i)
+	vt := v.Type()
+	dt := dst.Type()
+
+	if vt != dt && vt.ConvertibleTo(dt) {
+		dst.Set(v.Convert(dt))
+	} else {
+		dst.Set(v)
 	}
 
 	return nil
@@ -127,7 +136,13 @@ func (d *Decoder) decodeString(dst reflect.Value) error {
 		return err
 	}
 
-	dst.SetString(string(data))
+	isByteSlice := dst.Kind() == reflect.Slice && dst.Type().Elem().Kind() == reflect.Uint8
+
+	if isByteSlice {
+		dst.Set(reflect.ValueOf(data))
+	} else {
+		dst.SetString(string(data))
+	}
 
 	return nil
 }
@@ -135,8 +150,8 @@ func (d *Decoder) decodeString(dst reflect.Value) error {
 func (d *Decoder) decodeList(dst reflect.Value) error {
 	d.r.ReadByte()
 
-	fmt.Println("decoding slice", dst, dst.Type())
 	s := reflect.MakeSlice(dst.Type(), 0, 0)
+	elemType := dst.Type().Elem()
 
 	for {
 		if err := d.peekConsumeEnd(); err != nil {
@@ -147,16 +162,19 @@ func (d *Decoder) decodeList(dst reflect.Value) error {
 			return err
 		}
 
-		var v interface{}
-		if err := d.decode(reflect.ValueOf(&v).Elem()); err != nil {
+		v := reflect.New(elemType).Elem()
+		if err := d.decode(v); err != nil {
 			return err
 		}
 
-		s = reflect.Append(s, reflect.ValueOf(v))
+		s = reflect.Append(s, v)
 	}
 }
 
+// TODO: improve the search for key? avoid iterating everytime? maybe index tracking, then fallback to iteration
 func (d *Decoder) decodeDictionaryToStruct(dst reflect.Value, key string) error {
+	valueDecoded := false
+
 	for i := range dst.NumField() {
 		fieldVal := dst.Field(i)
 		fieldType := dst.Type().Field(i)
@@ -174,10 +192,19 @@ func (d *Decoder) decodeDictionaryToStruct(dst reflect.Value, key string) error 
 		_ = omitempty
 
 		if name == key {
+			valueDecoded = true
 			if err := d.decode(fieldVal); err != nil {
 				return err
 			}
 			break
+		}
+	}
+
+	// If the struct field does not exist (i.e., the destination does not have a corresponding field), but the input stream contains a valid value for it, we still need to consume/parse the value from the byte stream. Otherwise, the decoder would get out of sync and subsequent reads could fail or return incorrect data	 To handle this, we decode the value into a temporary `interface{}` variable. This allows the decoder to read and discard the data while maintaining the correct position in the input stream. Optionally, a "Strict" mode could be implemented to treat unknown fields as an error instead of silently skipping them.
+	if !valueDecoded {
+		var tmp interface{}
+		if err := d.decode(reflect.ValueOf(&tmp).Elem()); err != nil {
+			return err
 		}
 	}
 
@@ -186,8 +213,6 @@ func (d *Decoder) decodeDictionaryToStruct(dst reflect.Value, key string) error 
 
 func (d *Decoder) decodeDictionary(dst reflect.Value) error {
 	d.r.ReadByte()
-
-	fmt.Println(dst, dst.Type(), dst.Type().Kind())
 
 	var m reflect.Value
 	if dst.Type().Kind() == reflect.Map {
@@ -220,21 +245,18 @@ func (d *Decoder) decodeDictionary(dst reflect.Value) error {
 				return err
 			}
 		case reflect.Map:
-			if err := d.decodeDictionaryToMap(m, key); err != nil {
+			elemType := dst.Type().Elem()
+
+			value := reflect.New(elemType).Elem()
+			if err := d.decode(value); err != nil {
 				return err
 			}
+
+			m.SetMapIndex(reflect.ValueOf(key), value)
+		default:
+			return fmt.Errorf("invalid dictionary type: %s", dst.Kind())
 		}
 	}
-}
-
-func (d *Decoder) decodeDictionaryToMap(m reflect.Value, key string) error {
-	var value interface{}
-	v := reflect.ValueOf(&value).Elem()
-	if err := d.decode(v); err != nil {
-		return err
-	}
-	m.SetMapIndex(reflect.ValueOf(key), v)
-	return nil
 }
 
 func (d *Decoder) decodeToInterface(b byte, dst reflect.Value) error {
@@ -297,20 +319,27 @@ func (d *Decoder) decode(dst reflect.Value) error {
 	}
 }
 
-func (d *Decoder) Decode(src interface{}) error {
+func (d *Decoder) Decode(src interface{}) (err error) {
 	if reflect.TypeOf(src).Kind() != reflect.Pointer {
 		return errors.New("src needs to be a pointer")
 	}
 
 	value := reflect.ValueOf(src)
-	if err := d.decode(value); err != nil {
-		return err
+
+	defer func() {
+		if err != nil {
+			value.Elem().SetZero()
+		}
+	}()
+
+	if err = d.decode(value); err != nil {
+		return
 	}
 
 	if d.r.Buffered() > 0 {
-		value.Elem().SetZero()
-		return ErrTrailingDataLeft
+		err = ErrTrailingDataLeft
+		return
 	}
 
-	return nil
+	return
 }
