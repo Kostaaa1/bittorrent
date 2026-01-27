@@ -16,12 +16,14 @@ func getClientID() ([20]byte, error) {
 }
 
 func main() {
-	tf, err := torrent.NewFile("test_torrents/file5.torrent")
+	tf, err := torrent.NewFile("test_torrents/ml.torrent")
 	if err != nil {
 		log.Fatal(err)
 	}
+	tf.Print()
 
 	var port uint16 = 6881
+
 	clientID, err := getClientID()
 	if err != nil {
 		log.Fatal(err)

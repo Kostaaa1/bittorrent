@@ -2,6 +2,7 @@ package bencode
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,46 @@ import (
 
 type Decoder struct {
 	r *bufio.Reader
+	w *bytes.Buffer
+}
+
+type RawMessage interface {
+	RawMessage(b []byte) error
+}
+
+type Unmarshaler interface {
+	UnmarshalBencode(d *Decoder) error
+}
+
+const (
+	// KindString     = 0
+	KindInt        = 'i'
+	KindList       = 'l'
+	KindDictionary = 'd'
+)
+
+func (d *Decoder) readByte() (byte, error) {
+	b, err := d.r.ReadByte()
+	if err == nil && d.w != nil {
+		d.w.WriteByte(b)
+	}
+	return b, err
+}
+
+func (d *Decoder) PeekByte() byte {
+	b, err := d.r.Peek(1)
+	if err != nil {
+		return 0
+	}
+	return b[0]
+}
+
+func (d *Decoder) readFull(b []byte) (int, error) {
+	n, err := io.ReadFull(d.r, b)
+	if err == nil && d.w != nil {
+		d.w.Write(b[:n])
+	}
+	return n, err
 }
 
 func NewDecoder(r io.Reader) *Decoder {
@@ -25,7 +66,7 @@ func (d *Decoder) peekConsumeEnd() error {
 		return err
 	}
 	if b[0] == 'e' {
-		d.r.ReadByte()
+		d.readByte()
 		return errEnd
 	}
 	return nil
@@ -37,7 +78,7 @@ func (d *Decoder) readIntBytes(delim byte) (int, error) {
 	seen := false
 
 	for {
-		b, err := d.r.ReadByte()
+		b, err := d.readByte()
 		if err != nil {
 			if err == io.EOF {
 				return 0, ErrInvalidIntegerFormat
@@ -82,7 +123,7 @@ func (d *Decoder) readIntBytes(delim byte) (int, error) {
 }
 
 func (d *Decoder) decodeInt(dst reflect.Value) error {
-	_, err := d.r.ReadByte()
+	_, err := d.readByte()
 	if err != nil {
 		return err
 	}
@@ -132,12 +173,11 @@ func (d *Decoder) decodeString(dst reflect.Value) error {
 	}
 
 	data := make([]byte, intN)
-	if _, err := io.ReadFull(d.r, data); err != nil {
+	if _, err := d.readFull(data); err != nil {
 		return err
 	}
 
 	isByteSlice := dst.Kind() == reflect.Slice && dst.Type().Elem().Kind() == reflect.Uint8
-
 	if isByteSlice {
 		dst.Set(reflect.ValueOf(data))
 	} else {
@@ -148,7 +188,7 @@ func (d *Decoder) decodeString(dst reflect.Value) error {
 }
 
 func (d *Decoder) decodeList(dst reflect.Value) error {
-	d.r.ReadByte()
+	d.readByte()
 
 	s := reflect.MakeSlice(dst.Type(), 0, 0)
 	elemType := dst.Type().Elem()
@@ -171,7 +211,7 @@ func (d *Decoder) decodeList(dst reflect.Value) error {
 	}
 }
 
-// TODO: improve the search for key? avoid iterating everytime? maybe index tracking, then fallback to iteration
+// TODO: improve the search for key? avoid iterating everytime? maybe index tracking, then fallback to iteration.. Precompute the map?
 func (d *Decoder) decodeDictionaryToStruct(dst reflect.Value, key string) error {
 	valueDecoded := false
 
@@ -202,7 +242,7 @@ func (d *Decoder) decodeDictionaryToStruct(dst reflect.Value, key string) error 
 
 	// If the struct field does not exist (i.e., the destination does not have a corresponding field), but the input stream contains a valid value for it, we still need to consume/parse the value from the byte stream. Otherwise, the decoder would get out of sync and subsequent reads could fail or return incorrect data	 To handle this, we decode the value into a temporary `interface{}` variable. This allows the decoder to read and discard the data while maintaining the correct position in the input stream. Optionally, a "Strict" mode could be implemented to treat unknown fields as an error instead of silently skipping them.
 	if !valueDecoded {
-		var tmp interface{}
+		var tmp any
 		if err := d.decode(reflect.ValueOf(&tmp).Elem()); err != nil {
 			return err
 		}
@@ -212,7 +252,7 @@ func (d *Decoder) decodeDictionaryToStruct(dst reflect.Value, key string) error 
 }
 
 func (d *Decoder) decodeDictionary(dst reflect.Value) error {
-	d.r.ReadByte()
+	d.readByte()
 
 	var m reflect.Value
 	if dst.Type().Kind() == reflect.Map {
@@ -245,37 +285,41 @@ func (d *Decoder) decodeDictionary(dst reflect.Value) error {
 				return err
 			}
 		case reflect.Map:
-			elemType := dst.Type().Elem()
-
-			value := reflect.New(elemType).Elem()
-			if err := d.decode(value); err != nil {
+			if err := d.decodeMapValue(dst, m, key); err != nil {
 				return err
 			}
-
-			m.SetMapIndex(reflect.ValueOf(key), value)
 		default:
 			return fmt.Errorf("invalid dictionary type: %s", dst.Kind())
 		}
 	}
 }
 
+func (d *Decoder) decodeMapValue(dst, m reflect.Value, key string) error {
+	value := reflect.New(dst.Type().Elem()).Elem()
+	if err := d.decode(value); err != nil {
+		return err
+	}
+	m.SetMapIndex(reflect.ValueOf(key), value)
+	return nil
+}
+
 func (d *Decoder) decodeToInterface(b byte, dst reflect.Value) error {
 	var v any
 
 	switch b {
-	case 'l':
-		var tmp []interface{}
+	case KindList:
+		var tmp []any
 		if err := d.decodeList(reflect.ValueOf(&tmp).Elem()); err != nil {
 			return err
 		}
 		v = tmp
-	case 'd':
-		var tmp map[string]interface{}
+	case KindDictionary:
+		var tmp map[string]any
 		if err := d.decodeDictionary(reflect.ValueOf(&tmp).Elem()); err != nil {
 			return err
 		}
 		v = tmp
-	case 'i':
+	case KindInt:
 		var tmp int
 		if err := d.decodeInt(reflect.ValueOf(&tmp).Elem()); err != nil {
 			return err
@@ -294,6 +338,26 @@ func (d *Decoder) decodeToInterface(b byte, dst reflect.Value) error {
 }
 
 func (d *Decoder) decode(dst reflect.Value) error {
+	fmt.Println("CALLED DECODE:", dst, dst.Type(), dst.Type().Kind(), dst.IsNil())
+
+	if dst.Kind() == reflect.Pointer && dst.IsNil() {
+		dst.Set(reflect.New(dst.Type().Elem()))
+	}
+
+	if dst.CanAddr() && dst.NumMethod() > 0 {
+		fmt.Println("ADDRESSABLE AND METHODS", dst, dst.Type(), dst.Type().Kind(), dst.CanAddr(), dst.NumMethod())
+
+		m := dst.MethodByName("UnmarshalBencode")
+		fmt.Println("METHOD:", m)
+
+		if m.IsValid() {
+			args := []reflect.Value{reflect.ValueOf(d)}
+			value := m.Call(args)
+			fmt.Println("REFLECT VALUE:", value)
+			return nil
+		}
+	}
+
 	b, err := d.r.Peek(1)
 	if err != nil {
 		return err
@@ -307,24 +371,52 @@ func (d *Decoder) decode(dst reflect.Value) error {
 		return d.decodeToInterface(b[0], dst)
 	}
 
-	switch b[0] {
-	case 'l':
-		return d.decodeList(dst)
-	case 'd':
-		return d.decodeDictionary(dst)
-	case 'i':
-		return d.decodeInt(dst)
-	default:
-		return d.decodeString(dst)
+	var ok bool
+	var u RawMessage
+	if dst.CanAddr() {
+		u, ok = dst.Addr().Interface().(RawMessage)
+		if ok {
+			d.w = &bytes.Buffer{}
+		}
 	}
+
+	switch b[0] {
+	case KindList:
+		if err := d.decodeList(dst); err != nil {
+			return err
+		}
+	case KindDictionary:
+		if err := d.decodeDictionary(dst); err != nil {
+			return err
+		}
+	case KindInt:
+		if err := d.decodeInt(dst); err != nil {
+			return err
+		}
+	default:
+		if err := d.decodeString(dst); err != nil {
+			return err
+		}
+	}
+
+	if ok {
+		if err := u.RawMessage(d.w.Bytes()); err != nil {
+			return err
+		}
+		d.w = nil
+	}
+
+	return nil
 }
 
-func (d *Decoder) Decode(src interface{}) (err error) {
+func (d *Decoder) Decode(src any) (err error) {
 	if reflect.TypeOf(src).Kind() != reflect.Pointer {
 		return errors.New("src needs to be a pointer")
 	}
 
 	value := reflect.ValueOf(src)
+
+	fmt.Println("CALLED DECODE:", value, value.Type(), value.Type().Kind())
 
 	defer func() {
 		if err != nil {
@@ -336,10 +428,10 @@ func (d *Decoder) Decode(src interface{}) (err error) {
 		return
 	}
 
-	if d.r.Buffered() > 0 {
-		err = ErrTrailingDataLeft
-		return
-	}
+	// if d.r.Buffered() > 0 {
+	// 	err = ErrTrailingDataLeft
+	// 	return
+	// }
 
 	return
 }

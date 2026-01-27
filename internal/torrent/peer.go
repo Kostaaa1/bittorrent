@@ -156,64 +156,61 @@ func (p *Peer) readMessages() error {
 	}
 }
 
-func (p *Peer) handshake(hs *Handshake) error {
-	_, err := p.conn.Write(hs.Bytes())
+func handshake(conn net.Conn, hs *Handshake) error {
+	_, err := conn.Write(hs.Bytes())
 	if err != nil {
 		return fmt.Errorf("failed to write handshake: %v", err)
 	}
-	peerHandshake, err := ReadHandshake(p.conn)
+
+	peerHandshake, err := ReadHandshake(conn)
 	if err != nil {
 		return fmt.Errorf("failed to read handshake: %v", err)
 	}
-	if peerHandshake.InfoHash != hs.InfoHash {
-		return fmt.Errorf("failed to validate handshakes for peer: %s", p.conn.RemoteAddr())
+
+	pp := string(peerHandshake.Pstr)
+	hp := string(hs.Pstr)
+
+	if hp != pp {
+		return fmt.Errorf("handshake: protocol strings do not match: clients=%s, peers=%s", hp, pp)
 	}
+
+	if peerHandshake.InfoHash != hs.InfoHash {
+		return fmt.Errorf("handshake: info hashes do not match: %s", conn.RemoteAddr())
+	}
+
 	return nil
 }
 
-func DialPeer(addr string, hs *Handshake, tf *TorrentFile) error {
-	fmt.Println("Dialing peer:", addr)
-
-	conn, err := net.DialTimeout("tcp", addr, time.Second*30)
-	if err != nil {
-		return fmt.Errorf("failed to dial: %v", err)
-	}
-
+func (p *Peer) Work(
+	conn net.Conn,
+	pieces [][20]byte,
+	totalLength int,
+	pieceLength int,
+	files []*FileEntry,
+) error {
 	blockSize := int(math.Pow(2, 14))
 
 	peer := &Peer{
 		conn:              conn,
 		amInterested:      false,
 		peerChoking:       true,
-		numOfPieces:       len(tf.Pieces),
-		totalLength:       tf.TotalLength,
-		pieceLength:       tf.PieceLength,
+		numOfPieces:       len(pieces),
+		totalLength:       totalLength,
+		pieceLength:       pieceLength,
 		blockSize:         blockSize,
-		numBlocksPerPiece: tf.PieceLength / blockSize,
+		numBlocksPerPiece: pieceLength / blockSize,
 	}
-
-	peer.conn = conn
-	if err := peer.handshake(hs); err != nil {
-		fmt.Println("Handshake failed:", err)
-		if err := conn.Close(); err != nil {
-			return err
-		}
-		peer.conn = nil
-		return err
-	}
-
-	fmt.Println("Handshake successful with peer:", addr)
 
 	peer.writer = &PieceWriter{
 		blockSize:         peer.blockSize,
 		numBlocksPerPiece: peer.numBlocksPerPiece,
 		pieceLength:       peer.pieceLength,
 		totalLength:       peer.totalLength,
-		hashedPieces:      tf.Pieces,
+		hashedPieces:      pieces,
 		numWorkers:        3,
 		worker:            make(chan PieceMessage),
 		pieces:            make(map[int]*piece),
-		files:             tf.Files,
+		files:             files,
 	}
 
 	peer.pipeline = &requestPipeline{
@@ -229,4 +226,63 @@ func DialPeer(addr string, hs *Handshake, tf *TorrentFile) error {
 	go peer.writer.Start()
 
 	return peer.readMessages()
+}
+
+func DialPeer(addr string, hs *Handshake, tf *TorrentFile) (net.Conn, error) {
+	fmt.Println("Dialing peer:", addr)
+
+	conn, err := net.DialTimeout("tcp", addr, time.Second*5)
+	if err != nil {
+		return nil, fmt.Errorf("failed to dial: %v", err)
+	}
+
+	if err := handshake(conn, hs); err != nil {
+		if err := conn.Close(); err != nil {
+			return nil, err
+		}
+		return nil, err
+	}
+
+	fmt.Println("Handshake successful with peer:", addr)
+
+	return conn, nil
+
+	// blockSize := int(math.Pow(2, 14))
+
+	// peer := &Peer{
+	// 	conn:              conn,
+	// 	amInterested:      false,
+	// 	peerChoking:       true,
+	// 	numOfPieces:       len(tf.Pieces),
+	// 	totalLength:       tf.TotalLength,
+	// 	pieceLength:       tf.PieceLength,
+	// 	blockSize:         blockSize,
+	// 	numBlocksPerPiece: tf.PieceLength / blockSize,
+	// }
+
+	// peer.writer = &PieceWriter{
+	// 	blockSize:         peer.blockSize,
+	// 	numBlocksPerPiece: peer.numBlocksPerPiece,
+	// 	pieceLength:       peer.pieceLength,
+	// 	totalLength:       peer.totalLength,
+	// 	hashedPieces:      tf.Pieces,
+	// 	numWorkers:        3,
+	// 	worker:            make(chan PieceMessage),
+	// 	pieces:            make(map[int]*piece),
+	// 	files:             tf.Files,
+	// }
+
+	// peer.pipeline = &requestPipeline{
+	// 	windowSize: 4,
+	// 	reqSignal:  make(chan struct{}, 4),
+	// }
+
+	// if err := peer.sendInterested(); err != nil {
+	// 	return err
+	// }
+
+	// go peer.runPipeline()
+	// go peer.writer.Start()
+
+	// return peer.readMessages()
 }

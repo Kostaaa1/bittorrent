@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"sync"
 	"test/pkg/bencode"
 )
 
@@ -45,19 +46,38 @@ func NewFile(filename string) (*TorrentFile, error) {
 	return src.toTorrentFile()
 }
 
+func (tf *TorrentFile) Print() {
+	fmt.Println("Name: ", tf.Name)
+	fmt.Println("")
+	fmt.Println("GENERAL")
+	fmt.Println("")
+	fmt.Println("  Name: ", tf.Name)
+	fmt.Println("  Hash: ", hex.EncodeToString(tf.InfoHash[:]))
+	fmt.Println("  Piece Count: ", len(tf.Pieces))
+	fmt.Println("  Piece Size: ", tf.PieceLength)
+	fmt.Println("  Total Size: ", tf.TotalLength)
+	fmt.Println("  Privacy: ", hex.EncodeToString(tf.InfoHash[:]))
+	fmt.Println("")
+	fmt.Println("TRACKERS")
+	fmt.Println("")
+	fmt.Println("Print announce list...")
+	fmt.Println("")
+	fmt.Println("FILES")
+	fmt.Println("")
+	for _, f := range tf.Files {
+		fmt.Println("  ", f.FullPath)
+	}
+}
+
 func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
-	fmt.Println("Downloading file:")
-	fmt.Println("	- Name:", tf.Name)
-	fmt.Println("	- Files:", tf.Files)
-	fmt.Println("	- Info hash:", hex.EncodeToString(tf.InfoHash[:]))
-	fmt.Println("	- Length:", tf.TotalLength)
-	fmt.Println("	- PieceLength:", tf.PieceLength)
-	fmt.Println("	- Pieces:", len(tf.Pieces))
+	tf.Print()
 
 	peers, err := tf.discoverPeers(clientID, port)
 	if err != nil {
 		return err
 	}
+
+	fmt.Println("Peers:", peers)
 
 	hs := &Handshake{
 		Pstr:      []byte("BitTorrent protocol"),
@@ -66,43 +86,43 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 		PeerID:    clientID,
 	}
 
+	var wg sync.WaitGroup
+	semCh := make(chan struct{}, 5)
+
 	for _, peer := range peers {
-		if err := DialPeer(peer.ip4addr(), hs, tf); err != nil {
-			fmt.Printf("Peer dialing failed: peer=%s, error=%v\n", peer.ip4addr(), err)
-			continue
-		}
+		wg.Add(1)
+		go func() {
+			defer func() {
+				wg.Done()
+				<-semCh
+			}()
+
+			semCh <- struct{}{}
+
+			c, err := DialPeer(peer.ip4addr(), hs, tf)
+			if err != nil {
+				fmt.Println("handshake error:", err)
+				return
+			}
+			_ = c
+
+		}()
 	}
 
-	// peer := bencodePeer{IP: "185.203.56.65", Port: 55734 }
-	// peer := bencodePeer{IP: "82.65.106.14", Port: 6882}
-	// peer := bencodePeer{IP: "193.105.133.241", Port: 8999}
-	// peer := bencodePeer{IP: "143.177.152.79", Port: 2379}
-	// peer := bencodePeer{IP: "174.106.249.177", Port: 12881}
-	// peer := bencodePeer{IP: "91.193.6.186", Port: 48274}
-	// peer := bencodePeer{IP: "136.62.0.15", Port: 17604}
-	// peer := bencodePeer{IP: "198.54.134.252", Port: 11341 }
-	// peer := bencodePeer{IP: "204.8.98.45", Port: 32030}
-	// peer := bencodePeer{IP: "185.18.148.138", Port: 51413}
-	// peer := bencodePeer{IP: "86.83.93.76", Port: 6881}
-	// peer := bencodePeer{IP: "216.81.9.154", Port: 47980}
+	wg.Wait()
 
-	// if err := DialPeer(peer.ip4addr(), hs, tf); err != nil {
+	// for _, peer := range peers {
+	// 	if err := DialPeer(peer.ip4addr(), hs, tf); err != nil {
+	// 		fmt.Printf("Peer dialing failed: peer=%s, error=%v\n", peer.ip4addr(), err)
+	// 		continue
+	// 	}
+	// }
+
+	// peer := bencodePeer{IP: "46.165.50.78", Port: 50025}
+	// if _, err := DialPeer(peer.ip4addr(), hs, tf); err != nil {
 	// 	fmt.Println("handshake error:", err)
 	// 	return err
 	// }
-
-	// var wg sync.WaitGroup
-	// for _, peer := range peers {
-	// 	wg.Add(1)
-	// 	go func() {
-	// 		defer wg.Done()
-	// 		if err := peer.DialWithHandshake(hs); err != nil {
-	// 			fmt.Println("handshake error:", err)
-	// 			return
-	// 		}
-	// 	}()
-	// }
-	// wg.Wait()
 
 	return nil
 }
@@ -163,11 +183,23 @@ func (tf *TorrentFile) discoverPeers(peerID [20]byte, port uint16) ([]bencodePee
 	}
 	defer resp.Body.Close()
 
-	var response TrackerResponse
-	if err := bencode.NewDecoder(resp.Body).Decode(&response); err != nil {
+	var res bencodeTrackerResponse
+	if err := bencode.NewDecoder(resp.Body).Decode(&res); err != nil {
 		return nil, err
 	}
+	if res.FailureReason != "" {
+		return nil, fmt.Errorf("failed to get the peers from HTTP tracker=%s, error=%s", trackerURL, res.FailureReason)
+	}
 
-	// return parsePeersBinary(response.Peers)
-	return response.Peers, nil
+	fmt.Println("PEERS:", res.Peers)
+
+	// p := res.Peers.List
+	// if len(res.Peers.Compact) > 0 {
+	// 	v, err := parsePeersBinary(res.Peers.Compact)
+	// 	if err != nil {
+	// 	}
+	// 	p = v
+	// }
+
+	return nil, nil
 }

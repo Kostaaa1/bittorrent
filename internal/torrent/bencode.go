@@ -18,11 +18,13 @@ const (
 type bencodeTorrent struct {
 	Announce     string      `bencode:"announce"`
 	AnnounceList [][]string  `bencode:"announce-list"`
-	CreationDate int64       `bencode:"creation date"`
 	Comment      string      `bencode:"comment"`
 	CreatedBy    string      `bencode:"created by"`
+	CreationDate int64       `bencode:"creation date"`
 	Encoding     string      `bencode:"encoding"`
 	Info         bencodeInfo `bencode:"info"`
+	Publisher    string      `bencode:"publisher"`
+	PublisherURL string      `bencode:"publisher-url"`
 }
 
 type bencodeFile struct {
@@ -31,18 +33,57 @@ type bencodeFile struct {
 }
 
 type bencodeInfo struct {
-	Name        string        `bencode:"name"`
-	Length      *int          `bencode:"length,omitempty"`
 	Files       []bencodeFile `bencode:"files,omitempty"`
+	Length      *int          `bencode:"length,omitempty"`
+	Name        string        `bencode:"name"`
 	PieceLength int           `bencode:"piece length"`
 	Pieces      string        `bencode:"pieces"`
 	Private     int           `bencode:"private"`
+	Hash        [20]byte
+}
+
+func (i *bencodeInfo) RawMessage(b []byte) error {
+	i.Hash = sha1.Sum(b)
+	return nil
 }
 
 type bencodePeer struct {
 	PeerID string `bencode:"peer id"`
 	IP     string `bencode:"ip"`
 	Port   uint16 `bencode:"port"`
+}
+
+type Peers struct {
+	Compact []byte
+	List    []bencodePeer
+}
+
+func (p *Peers) UnmarshalBencode(d *bencode.Decoder) error {
+	fmt.Println("Called unmarshal bencode:")
+
+	switch d.PeekByte() {
+	case bencode.KindList:
+		if err := d.Decode(&p.List); err != nil {
+			return err
+		}
+	default:
+		if err := d.Decode(&p.Compact); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type bencodeTrackerResponse struct {
+	FailureReason  string `bencode:"failure reason"`
+	WarningMessage string `bencode:"warning reason"`
+	Interval       int    `bencode:"interval"`
+	MinInterval    int    `bencode:"min interval"`
+	TrackerID      string `bencode:"tracker id"`
+	Complete       int    `bencode:"complete"`
+	Incomplete     int    `bencode:"incomplete"`
+	Peers6         string `bencode:"peers6"`
+	Peers          Peers  `bencode:"peers"`
 }
 
 func (p *bencodePeer) ip4addr() string {
@@ -65,14 +106,6 @@ func (i bencodeInfo) totalLength() (int, error) {
 	return 0, errors.New("invalid length: length and files are missing in bencode info")
 }
 
-func (i bencodeInfo) hash() ([20]byte, error) {
-	buf, err := bencode.Marshal(i)
-	if err != nil {
-		return [20]byte{}, err
-	}
-	return sha1.Sum(buf), nil
-}
-
 func (info *bencodeInfo) readPieces() ([][20]byte, error) {
 	buf := []byte(info.Pieces)
 
@@ -92,6 +125,7 @@ func (info *bencodeInfo) readPieces() ([][20]byte, error) {
 
 func (bto *bencodeTorrent) prepareFileEntries() []*FileEntry {
 	files := make([]*FileEntry, len(bto.Info.Files))
+
 	var start, end int
 
 	for i, file := range bto.Info.Files {
@@ -107,6 +141,7 @@ func (bto *bencodeTorrent) prepareFileEntries() []*FileEntry {
 			StartOffset: start,
 			EndOffset:   end,
 		}
+
 		start += file.Length
 	}
 
@@ -115,11 +150,6 @@ func (bto *bencodeTorrent) prepareFileEntries() []*FileEntry {
 
 func (bto *bencodeTorrent) toTorrentFile() (*TorrentFile, error) {
 	pieces, err := bto.Info.readPieces()
-	if err != nil {
-		return nil, err
-	}
-
-	hash, err := bto.Info.hash()
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +164,7 @@ func (bto *bencodeTorrent) toTorrentFile() (*TorrentFile, error) {
 		Name:        bto.Info.Name,
 		TotalLength: total,
 		PieceLength: bto.Info.PieceLength,
-		InfoHash:    hash,
+		InfoHash:    bto.Info.Hash,
 		Pieces:      pieces,
 		Files:       bto.prepareFileEntries(),
 	}, nil
