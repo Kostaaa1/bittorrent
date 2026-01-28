@@ -191,15 +191,13 @@ func (tf *TorrentFile) discoverPeers(peerID [20]byte, port uint16) ([]bencodePee
 		return nil, fmt.Errorf("failed to get the peers from HTTP tracker=%s, error=%s", trackerURL, res.FailureReason)
 	}
 
-	fmt.Println("PEERS:", res.Peers)
+	p := res.Peers.List
+	if len(res.Peers.Compact) > 0 {
+		v, err := parsePeersBinary(res.Peers.Compact)
+		if err != nil {
+		}
+		p = v
+	}
 
-	// p := res.Peers.List
-	// if len(res.Peers.Compact) > 0 {
-	// 	v, err := parsePeersBinary(res.Peers.Compact)
-	// 	if err != nil {
-	// 	}
-	// 	p = v
-	// }
-
-	return nil, nil
+	return p, nil
 }

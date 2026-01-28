@@ -42,9 +42,8 @@ type bencodeInfo struct {
 	Hash        [20]byte
 }
 
-func (i *bencodeInfo) RawMessage(b []byte) error {
+func (i *bencodeInfo) RawMessage(b []byte) {
 	i.Hash = sha1.Sum(b)
-	return nil
 }
 
 type bencodePeer struct {
@@ -59,8 +58,6 @@ type Peers struct {
 }
 
 func (p *Peers) UnmarshalBencode(d *bencode.Decoder) error {
-	fmt.Println("Called unmarshal bencode:")
-
 	switch d.PeekByte() {
 	case bencode.KindList:
 		if err := d.Decode(&p.List); err != nil {

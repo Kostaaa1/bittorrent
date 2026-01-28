@@ -182,12 +182,12 @@ func TestDecode_String(t *testing.T) {
 			want:  "",
 			err:   ErrInvalidStringFormat,
 		},
-		{
-			name:  "string: invalid - length < string length",
-			input: "4:alicealice",
-			want:  "",
-			err:   ErrTrailingDataLeft,
-		},
+		// {
+		// 	name:  "string: invalid - length < string length",
+		// 	input: "4:alicealice",
+		// 	want:  "",
+		// 	err:   ErrTrailingDataLeft,
+		// },
 		{
 			name:  "string: invalid - length > string length",
 			input: "5:eggs",

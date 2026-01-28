@@ -15,7 +15,7 @@ type Decoder struct {
 }
 
 type RawMessage interface {
-	RawMessage(b []byte) error
+	RawMessage(b []byte)
 }
 
 type Unmarshaler interface {
@@ -337,25 +337,39 @@ func (d *Decoder) decodeToInterface(b byte, dst reflect.Value) error {
 	return nil
 }
 
-func (d *Decoder) decode(dst reflect.Value) error {
-	fmt.Println("CALLED DECODE:", dst, dst.Type(), dst.Type().Kind(), dst.IsNil())
-
-	if dst.Kind() == reflect.Pointer && dst.IsNil() {
-		dst.Set(reflect.New(dst.Type().Elem()))
+// ensures non-zero ptr value
+func (d *Decoder) ptr(dst reflect.Value) reflect.Value {
+	if dst.Kind() == reflect.Ptr {
+		if dst.IsNil() {
+			dst.Set(reflect.New(dst.Type().Elem()))
+		}
+		return dst
 	}
 
-	if dst.CanAddr() && dst.NumMethod() > 0 {
-		fmt.Println("ADDRESSABLE AND METHODS", dst, dst.Type(), dst.Type().Kind(), dst.CanAddr(), dst.NumMethod())
+	if dst.CanAddr() {
+		return dst.Addr()
+	}
 
-		m := dst.MethodByName("UnmarshalBencode")
-		fmt.Println("METHOD:", m)
+	return reflect.New(dst.Type())
+}
 
-		if m.IsValid() {
-			args := []reflect.Value{reflect.ValueOf(d)}
-			value := m.Call(args)
-			fmt.Println("REFLECT VALUE:", value)
-			return nil
-		}
+func (d *Decoder) decode(dst reflect.Value) error {
+	dst = d.ptr(dst)
+
+	if unmarshaler, ok := dst.Interface().(Unmarshaler); ok {
+		return unmarshaler.UnmarshalBencode(d)
+	}
+
+	if rm, ok := dst.Interface().(RawMessage); ok {
+		d.w = &bytes.Buffer{}
+		defer func() {
+			rm.RawMessage(d.w.Bytes())
+			d.w = nil
+		}()
+	}
+
+	if dst.Type().Kind() == reflect.Pointer {
+		dst = dst.Elem()
 	}
 
 	b, err := d.r.Peek(1)
@@ -363,21 +377,8 @@ func (d *Decoder) decode(dst reflect.Value) error {
 		return err
 	}
 
-	if dst.Type().Kind() == reflect.Pointer {
-		dst = dst.Elem()
-	}
-
 	if dst.Type().Kind() == reflect.Interface {
 		return d.decodeToInterface(b[0], dst)
-	}
-
-	var ok bool
-	var u RawMessage
-	if dst.CanAddr() {
-		u, ok = dst.Addr().Interface().(RawMessage)
-		if ok {
-			d.w = &bytes.Buffer{}
-		}
 	}
 
 	switch b[0] {
@@ -399,13 +400,6 @@ func (d *Decoder) decode(dst reflect.Value) error {
 		}
 	}
 
-	if ok {
-		if err := u.RawMessage(d.w.Bytes()); err != nil {
-			return err
-		}
-		d.w = nil
-	}
-
 	return nil
 }
 
@@ -415,8 +409,6 @@ func (d *Decoder) Decode(src any) (err error) {
 	}
 
 	value := reflect.ValueOf(src)
-
-	fmt.Println("CALLED DECODE:", value, value.Type(), value.Type().Kind())
 
 	defer func() {
 		if err != nil {
