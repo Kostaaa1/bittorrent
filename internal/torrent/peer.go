@@ -228,61 +228,59 @@ func (p *Peer) Work(
 	return peer.readMessages()
 }
 
-func DialPeer(addr string, hs *Handshake, tf *TorrentFile) (net.Conn, error) {
+func DialPeer(addr string, hs *Handshake, tf *TorrentFile) error {
 	fmt.Println("Dialing peer:", addr)
 
 	conn, err := net.DialTimeout("tcp", addr, time.Second*5)
 	if err != nil {
-		return nil, fmt.Errorf("failed to dial: %v", err)
+		return fmt.Errorf("failed to dial: %v", err)
 	}
 
 	if err := handshake(conn, hs); err != nil {
 		if err := conn.Close(); err != nil {
-			return nil, err
+			return err
 		}
-		return nil, err
+		return err
 	}
 
 	fmt.Println("Handshake successful with peer:", addr)
 
-	return conn, nil
+	blockSize := int(math.Pow(2, 14))
 
-	// blockSize := int(math.Pow(2, 14))
+	peer := &Peer{
+		conn:              conn,
+		amInterested:      false,
+		peerChoking:       true,
+		numOfPieces:       len(tf.Pieces),
+		totalLength:       tf.TotalLength,
+		pieceLength:       tf.PieceLength,
+		blockSize:         blockSize,
+		numBlocksPerPiece: tf.PieceLength / blockSize,
+	}
 
-	// peer := &Peer{
-	// 	conn:              conn,
-	// 	amInterested:      false,
-	// 	peerChoking:       true,
-	// 	numOfPieces:       len(tf.Pieces),
-	// 	totalLength:       tf.TotalLength,
-	// 	pieceLength:       tf.PieceLength,
-	// 	blockSize:         blockSize,
-	// 	numBlocksPerPiece: tf.PieceLength / blockSize,
-	// }
+	peer.writer = &PieceWriter{
+		blockSize:         peer.blockSize,
+		numBlocksPerPiece: peer.numBlocksPerPiece,
+		pieceLength:       peer.pieceLength,
+		totalLength:       peer.totalLength,
+		hashedPieces:      tf.Pieces,
+		numWorkers:        3,
+		worker:            make(chan PieceMessage),
+		pieces:            make(map[int]*piece),
+		files:             tf.Files,
+	}
 
-	// peer.writer = &PieceWriter{
-	// 	blockSize:         peer.blockSize,
-	// 	numBlocksPerPiece: peer.numBlocksPerPiece,
-	// 	pieceLength:       peer.pieceLength,
-	// 	totalLength:       peer.totalLength,
-	// 	hashedPieces:      tf.Pieces,
-	// 	numWorkers:        3,
-	// 	worker:            make(chan PieceMessage),
-	// 	pieces:            make(map[int]*piece),
-	// 	files:             tf.Files,
-	// }
+	peer.pipeline = &requestPipeline{
+		windowSize: 4,
+		reqSignal:  make(chan struct{}, 4),
+	}
 
-	// peer.pipeline = &requestPipeline{
-	// 	windowSize: 4,
-	// 	reqSignal:  make(chan struct{}, 4),
-	// }
+	if err := peer.sendInterested(); err != nil {
+		return err
+	}
 
-	// if err := peer.sendInterested(); err != nil {
-	// 	return err
-	// }
+	go peer.runPipeline()
+	go peer.writer.Start()
 
-	// go peer.runPipeline()
-	// go peer.writer.Start()
-
-	// return peer.readMessages()
+	return peer.readMessages()
 }

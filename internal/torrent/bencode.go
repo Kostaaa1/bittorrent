@@ -3,7 +3,6 @@ package torrent
 import (
 	"crypto/sha1"
 	"errors"
-	"fmt"
 	"path/filepath"
 	"test/pkg/bencode"
 )
@@ -25,6 +24,7 @@ type bencodeTorrent struct {
 	Info         bencodeInfo `bencode:"info"`
 	Publisher    string      `bencode:"publisher"`
 	PublisherURL string      `bencode:"publisher-url"`
+	UrlList      []string    `bencode:"url-list"`
 }
 
 type bencodeFile struct {
@@ -71,22 +71,6 @@ func (p *Peers) UnmarshalBencode(d *bencode.Decoder) error {
 	return nil
 }
 
-type bencodeTrackerResponse struct {
-	FailureReason  string `bencode:"failure reason"`
-	WarningMessage string `bencode:"warning reason"`
-	Interval       int    `bencode:"interval"`
-	MinInterval    int    `bencode:"min interval"`
-	TrackerID      string `bencode:"tracker id"`
-	Complete       int    `bencode:"complete"`
-	Incomplete     int    `bencode:"incomplete"`
-	Peers6         string `bencode:"peers6"`
-	Peers          Peers  `bencode:"peers"`
-}
-
-func (p *bencodePeer) ip4addr() string {
-	return fmt.Sprintf("%s:%d", p.IP, p.Port)
-}
-
 func (i bencodeInfo) totalLength() (int, error) {
 	if i.Length != nil {
 		return *i.Length, nil
@@ -121,8 +105,23 @@ func (info *bencodeInfo) readPieces() ([][20]byte, error) {
 }
 
 func (bto *bencodeTorrent) prepareFileEntries() []*FileEntry {
-	files := make([]*FileEntry, len(bto.Info.Files))
+	if len(bto.Info.Files) == 0 {
+		files := make([]*FileEntry, 1)
 
+		l := *bto.Info.Length
+
+		files[0] = &FileEntry{
+			ID:          0,
+			FullPath:    bto.Info.Name,
+			Length:      l,
+			StartOffset: 0,
+			EndOffset:   l,
+		}
+
+		return files
+	}
+
+	files := make([]*FileEntry, len(bto.Info.Files))
 	var start, end int
 
 	for i, file := range bto.Info.Files {
@@ -156,13 +155,24 @@ func (bto *bencodeTorrent) toTorrentFile() (*TorrentFile, error) {
 		return nil, err
 	}
 
+	entries := bto.prepareFileEntries()
+
 	return &TorrentFile{
-		Announce:    bto.Announce,
-		Name:        bto.Info.Name,
-		TotalLength: total,
-		PieceLength: bto.Info.PieceLength,
-		InfoHash:    bto.Info.Hash,
-		Pieces:      pieces,
-		Files:       bto.prepareFileEntries(),
+		Announce:     bto.Announce,
+		Name:         bto.Info.Name,
+		TotalLength:  total,
+		PieceLength:  bto.Info.PieceLength,
+		InfoHash:     bto.Info.Hash,
+		Pieces:       pieces,
+		Private:      bto.Info.Private,
+		AnnounceList: bto.AnnounceList,
+		Comment:      bto.Comment,
+		CreatedBy:    bto.CreatedBy,
+		CreationDate: bto.CreationDate,
+		Encoding:     bto.Encoding,
+		Publisher:    bto.Publisher,
+		PublisherURL: bto.PublisherURL,
+		Files:        entries,
+		UrlList:      bto.UrlList,
 	}, nil
 }

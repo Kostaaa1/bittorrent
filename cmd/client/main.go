@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"log"
+	"os"
 	"test/internal/torrent"
 )
 
@@ -16,18 +17,24 @@ func getClientID() ([20]byte, error) {
 }
 
 func main() {
-	tf, err := torrent.NewFile("test_torrents/ml.torrent")
+	if len(os.Args) <= 1 {
+		panic("input missing")
+	}
+
+	input := os.Args[1]
+
+	tf, err := torrent.NewFile(input)
 	if err != nil {
 		log.Fatal(err)
 	}
 	tf.Print()
 
-	var port uint16 = 6881
-
 	clientID, err := getClientID()
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	var port uint16 = 6881
 
 	if err := tf.Download(clientID, port); err != nil {
 		log.Fatal(err)

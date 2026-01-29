@@ -1,14 +1,11 @@
 package torrent
 
 import (
-	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"net/http"
-	"net/url"
 	"os"
-	"strconv"
 	"sync"
+	"test/internal/torrent/tracker"
 	"test/pkg/bencode"
 )
 
@@ -25,10 +22,85 @@ type TorrentFile struct {
 	TotalLength int
 	PieceLength int
 	Announce    string
+	UrlList     []string
 	Files       []*FileEntry
 	Name        string
 	Pieces      [][20]byte
 	InfoHash    [20]byte
+
+	// for printing...
+	AnnounceList [][]string
+	Comment      string
+	CreatedBy    string
+	CreationDate int64
+	Encoding     string
+	Publisher    string
+	PublisherURL string
+	Private      int
+}
+
+func (b *TorrentFile) Print() {
+	prefix := "  "
+	fmt.Println("Name:", b.Name)
+	fmt.Println("")
+	fmt.Println("GENERAL")
+	fmt.Println("")
+	fmt.Println(prefix, "Name:", b.Name)
+	fmt.Println(prefix, "Hash:", hex.EncodeToString(b.InfoHash[:]))
+	if b.CreatedBy != "" {
+		fmt.Println(prefix, "Created by:", b.CreatedBy)
+	}
+	if b.CreationDate > 0 {
+		fmt.Println(prefix, "Created on:", b.CreationDate)
+	}
+	fmt.Println("")
+	if b.Comment != "" {
+		fmt.Println(prefix, "Comment:", b.Comment)
+	}
+	if b.Publisher != "" {
+		fmt.Println(prefix, "Source:", b.Publisher)
+	}
+	fmt.Println(prefix, "Piece Count:", len(b.Pieces))
+	fmt.Println(prefix, "Piece Size:", b.PieceLength)
+	fmt.Println(prefix, "Total Size:", b.TotalLength)
+	if b.Private == 0 {
+		fmt.Println(prefix, "Privacy: Public torrent")
+	} else {
+		fmt.Println(prefix, "Privacy: Private torrent")
+	}
+	if len(b.AnnounceList) > 0 {
+		fmt.Println("")
+		fmt.Println("TRACKERS")
+		fmt.Println("")
+		for i, ann := range b.AnnounceList {
+			fmt.Println(prefix, "Tier #", i+1)
+			for _, t := range ann {
+				fmt.Println(prefix, t)
+			}
+			fmt.Println("")
+		}
+	} else if b.Announce != "" {
+		fmt.Println("")
+		fmt.Println("TRACKERS")
+		fmt.Println("")
+		fmt.Println(prefix, "Tier #1")
+		fmt.Println(prefix, b.Announce)
+	}
+	if len(b.UrlList) > 0 && b.UrlList[0] != "" {
+		fmt.Println("")
+		fmt.Println("WEBSEEDS")
+		fmt.Println("")
+		for _, url := range b.UrlList {
+			fmt.Println(prefix, url)
+		}
+	}
+	if len(b.Files) > 0 {
+		fmt.Println("FILES")
+		fmt.Println("")
+		for _, f := range b.Files {
+			fmt.Printf("%s%s (%d)\n", prefix, f.FullPath, f.Length)
+		}
+	}
 }
 
 func NewFile(filename string) (*TorrentFile, error) {
@@ -46,37 +118,26 @@ func NewFile(filename string) (*TorrentFile, error) {
 	return src.toTorrentFile()
 }
 
-func (tf *TorrentFile) Print() {
-	fmt.Println("Name: ", tf.Name)
-	fmt.Println("")
-	fmt.Println("GENERAL")
-	fmt.Println("")
-	fmt.Println("  Name: ", tf.Name)
-	fmt.Println("  Hash: ", hex.EncodeToString(tf.InfoHash[:]))
-	fmt.Println("  Piece Count: ", len(tf.Pieces))
-	fmt.Println("  Piece Size: ", tf.PieceLength)
-	fmt.Println("  Total Size: ", tf.TotalLength)
-	fmt.Println("  Privacy: ", hex.EncodeToString(tf.InfoHash[:]))
-	fmt.Println("")
-	fmt.Println("TRACKERS")
-	fmt.Println("")
-	fmt.Println("Print announce list...")
-	fmt.Println("")
-	fmt.Println("FILES")
-	fmt.Println("")
-	for _, f := range tf.Files {
-		fmt.Println("  ", f.FullPath)
-	}
-}
-
 func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
-	tf.Print()
+	p := tracker.HTTPTrackerRequestParams{
+		Tracker:  tf.Announce,
+		InfoHash: tf.InfoHash,
+		PeerID:   clientID,
+		Port:     port,
+		Left:     tf.TotalLength,
+	}
 
-	peers, err := tf.discoverPeers(clientID, port)
+	trackerURL, err := tracker.BuildHTTPTrackerURL(p)
 	if err != nil {
 		return err
 	}
 
+	peers, err := tracker.RequestPeers(trackerURL)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(tf.Announce)
 	fmt.Println("Peers:", peers)
 
 	hs := &Handshake{
@@ -87,117 +148,23 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 	}
 
 	var wg sync.WaitGroup
-	semCh := make(chan struct{}, 5)
 
 	for _, peer := range peers {
+		p := peer
 		wg.Add(1)
 		go func() {
-			defer func() {
-				wg.Done()
-				<-semCh
-			}()
+			defer wg.Done()
 
-			semCh <- struct{}{}
+			ip4 := fmt.Sprintf("%s:%d", p.IP, p.Port)
 
-			c, err := DialPeer(peer.ip4addr(), hs, tf)
-			if err != nil {
-				fmt.Println("handshake error:", err)
+			if err := DialPeer(ip4, hs, tf); err != nil {
+				fmt.Println("Failed to dial peer:", err)
 				return
 			}
-			_ = c
-
 		}()
 	}
 
 	wg.Wait()
 
-	// for _, peer := range peers {
-	// 	if err := DialPeer(peer.ip4addr(), hs, tf); err != nil {
-	// 		fmt.Printf("Peer dialing failed: peer=%s, error=%v\n", peer.ip4addr(), err)
-	// 		continue
-	// 	}
-	// }
-
-	// peer := bencodePeer{IP: "46.165.50.78", Port: 50025}
-	// if _, err := DialPeer(peer.ip4addr(), hs, tf); err != nil {
-	// 	fmt.Println("handshake error:", err)
-	// 	return err
-	// }
-
 	return nil
-}
-
-func (tf *TorrentFile) buildHttpTrackerURL(peerID [20]byte, port uint16) (*url.URL, error) {
-	parsed, err := url.Parse(tf.Announce)
-	if err != nil {
-		return nil, err
-	}
-	v := url.Values{
-		"info_hash":  []string{string(tf.InfoHash[:])},
-		"peer_id":    []string{string(peerID[:])},
-		"port":       []string{strconv.Itoa(int(port))},
-		"uploaded":   []string{"0"},
-		"downloaded": []string{"0"},
-		"left":       []string{strconv.Itoa(int(tf.TotalLength))},
-		// "compact":    []string{"1"},
-	}
-	parsed.RawQuery = v.Encode()
-
-	return parsed, nil
-}
-
-func toPeer(b [6]byte) bencodePeer {
-	return bencodePeer{
-		PeerID: "",
-		IP:     fmt.Sprintf("%d.%d.%d.%d", b[0], b[1], b[2], b[3]),
-		Port:   binary.BigEndian.Uint16([]byte{b[4], b[5]}),
-	}
-}
-
-func parsePeersBinary(peers []byte) ([]bencodePeer, error) {
-	if len(peers)%6 != 0 {
-		return nil, fmt.Errorf("peers received in wrong format: not divisible by 6 - %d", len(peers))
-	}
-
-	numPeers := len(peers) / 6
-
-	parsed := make([]bencodePeer, numPeers)
-	for i := range parsed {
-		v := [6]byte{}
-		copy(v[:], peers[i:i+6])
-		parsed[i] = toPeer(v)
-	}
-
-	return parsed, nil
-}
-
-func (tf *TorrentFile) discoverPeers(peerID [20]byte, port uint16) ([]bencodePeer, error) {
-	trackerURL, err := tf.buildHttpTrackerURL(peerID, port)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := http.Get(trackerURL.String())
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var res bencodeTrackerResponse
-	if err := bencode.NewDecoder(resp.Body).Decode(&res); err != nil {
-		return nil, err
-	}
-	if res.FailureReason != "" {
-		return nil, fmt.Errorf("failed to get the peers from HTTP tracker=%s, error=%s", trackerURL, res.FailureReason)
-	}
-
-	p := res.Peers.List
-	if len(res.Peers.Compact) > 0 {
-		v, err := parsePeersBinary(res.Peers.Compact)
-		if err != nil {
-		}
-		p = v
-	}
-
-	return p, nil
 }
