@@ -4,7 +4,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
-	"sync"
 	"test/internal/torrent/tracker"
 	"test/pkg/bencode"
 )
@@ -118,27 +117,49 @@ func NewFile(filename string) (*TorrentFile, error) {
 	return src.toTorrentFile()
 }
 
+func (tf *TorrentFile) DiscoverPeers(c chan<- tracker.PeerInfo, p *tracker.HTTPTrackerRequestParams) error {
+	if len(tf.AnnounceList) > 0 {
+		for _, list := range tf.AnnounceList {
+			for _, ann := range list {
+				p.Tracker = ann
+
+				peers, err := tracker.DiscoverPeers(*p)
+				if err != nil {
+					return err
+				}
+
+				for _, peer := range peers {
+					c <- peer
+				}
+			}
+		}
+	} else {
+		p.Tracker = tf.Announce
+
+		peers, err := tracker.DiscoverPeers(*p)
+		if err != nil {
+			return err
+		}
+
+		for _, peer := range peers {
+			c <- peer
+		}
+	}
+
+	return nil
+}
+
 func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
-	p := tracker.HTTPTrackerRequestParams{
-		Tracker:  tf.Announce,
+	p := &tracker.HTTPTrackerRequestParams{
 		InfoHash: tf.InfoHash,
 		PeerID:   clientID,
 		Port:     port,
 		Left:     tf.TotalLength,
 	}
 
-	trackerURL, err := tracker.BuildHTTPTrackerURL(p)
-	if err != nil {
-		return err
-	}
+	peerCh := make(chan tracker.PeerInfo)
 
-	peers, err := tracker.RequestPeers(trackerURL)
-	if err != nil {
-		return err
-	}
-
-	fmt.Println(tf.Announce)
-	fmt.Println("Peers:", peers)
+	tf.DiscoverPeers(peerCh, p)
 
 	hs := &Handshake{
 		Pstr:      []byte("BitTorrent protocol"),
@@ -147,24 +168,11 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 		PeerID:    clientID,
 	}
 
-	var wg sync.WaitGroup
+	_ = hs
 
-	for _, peer := range peers {
-		p := peer
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
-			ip4 := fmt.Sprintf("%s:%d", p.IP, p.Port)
-
-			if err := DialPeer(ip4, hs, tf); err != nil {
-				fmt.Println("Failed to dial peer:", err)
-				return
-			}
-		}()
+	for peer := range peerCh {
+		fmt.Println("received peer:", peer)
 	}
-
-	wg.Wait()
 
 	return nil
 }

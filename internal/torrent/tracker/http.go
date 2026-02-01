@@ -21,7 +21,7 @@ type HTTPTrackerResponse struct {
 	Peers          Peers  `bencode:"peers"`
 }
 
-type peerInfo struct {
+type PeerInfo struct {
 	PeerID string `bencode:"peer id"`
 	IP     string `bencode:"ip"`
 	Port   uint16 `bencode:"port"`
@@ -29,7 +29,7 @@ type peerInfo struct {
 
 type Peers struct {
 	Binary []byte
-	List   []peerInfo
+	List   []PeerInfo
 }
 
 func (p *Peers) UnmarshalBencode(d *bencode.Decoder) error {
@@ -69,7 +69,15 @@ type HTTPTrackerRequestParams struct {
 	// trackerid: Optional. If a previous announce contained a tracker id, it should be set here.
 }
 
-func BuildHTTPTrackerURL(p HTTPTrackerRequestParams) (string, error) {
+func DiscoverPeers(params HTTPTrackerRequestParams) ([]PeerInfo, error) {
+	u, err := buildHTTPTrackerURL(params)
+	if err != nil {
+		return nil, err
+	}
+	return requestPeers(u)
+}
+
+func buildHTTPTrackerURL(p HTTPTrackerRequestParams) (string, error) {
 	parsed, err := url.Parse(p.Tracker)
 	if err != nil {
 		return "", err
@@ -89,27 +97,7 @@ func BuildHTTPTrackerURL(p HTTPTrackerRequestParams) (string, error) {
 	return parsed.String(), nil
 }
 
-func parsePeersBinary(peers []byte) ([]peerInfo, error) {
-	if len(peers)%6 != 0 {
-		return nil, fmt.Errorf("peers received in wrong format: not divisible by 6 - %d", len(peers))
-	}
-
-	parsed := make([]peerInfo, len(peers)/6)
-
-	for i := range parsed {
-		b := [6]byte{}
-		copy(b[:], peers[i:i+6])
-
-		parsed[i] = peerInfo{
-			IP:   fmt.Sprintf("%d.%d.%d.%d", b[0], b[1], b[2], b[3]),
-			Port: binary.BigEndian.Uint16([]byte{b[4], b[5]}),
-		}
-	}
-
-	return parsed, nil
-}
-
-func RequestPeers(trackerURL string) ([]peerInfo, error) {
+func requestPeers(trackerURL string) ([]PeerInfo, error) {
 	resp, err := http.Get(trackerURL)
 	if err != nil {
 		return nil, err
@@ -136,4 +124,24 @@ func RequestPeers(trackerURL string) ([]peerInfo, error) {
 	}
 
 	return p, nil
+}
+
+func parsePeersBinary(peers []byte) ([]PeerInfo, error) {
+	if len(peers)%6 != 0 {
+		return nil, fmt.Errorf("peers received in wrong format: not divisible by 6 - %d", len(peers))
+	}
+
+	parsed := make([]PeerInfo, len(peers)/6)
+
+	for i := range parsed {
+		b := [6]byte{}
+		copy(b[:], peers[i:i+6])
+
+		parsed[i] = PeerInfo{
+			IP:   fmt.Sprintf("%d.%d.%d.%d", b[0], b[1], b[2], b[3]),
+			Port: binary.BigEndian.Uint16([]byte{b[4], b[5]}),
+		}
+	}
+
+	return parsed, nil
 }
