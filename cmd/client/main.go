@@ -33,7 +33,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
 	var port uint16 = 6881
 
 	if err := tf.Download(clientID, port); err != nil {

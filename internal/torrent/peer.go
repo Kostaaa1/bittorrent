@@ -3,46 +3,11 @@ package torrent
 import (
 	"fmt"
 	"io"
-	"math"
 	"net"
-	"time"
 )
 
-func (p *Peer) writeMsg(msg Message) error {
-	if _, err := p.conn.Write(msg.Bytes()); err != nil {
-		return err
-	}
-	return nil
-}
-func (p *Peer) sendChoke() error {
-	p.amChoking = true
-	return p.writeMsg(Message{ID: MsgChoke})
-}
-func (p *Peer) sendUnchoke() error {
-	p.amChoking = false
-	return p.writeMsg(Message{ID: MsgUnchoke})
-}
-func (p *Peer) sendInterested() error {
-	p.amInterested = true
-	return p.writeMsg(Message{ID: MsgInterested})
-}
-func (p *Peer) sendUninterested() error {
-	p.amInterested = false
-	return p.writeMsg(Message{ID: MsgUninterested})
-}
-func (p *Peer) sendHave() error {
-	// return p.writeMsg(Message{ID: MsgHave, Payload: []byte()})
-	return nil
-}
-func (p *Peer) sendRequest(index, begin, block int) error {
-	// TODO: before requesting, we need to ask the peer if it has that piece
-	fmt.Println("[REQUEST] request piece:", index, begin, block)
-	payload := FormatRequest(index, begin, block)
-	return p.writeMsg(Message{ID: MsgRequest, Payload: payload})
-}
-
 type Peer struct {
-	addr     string
+	ID       int
 	conn     net.Conn
 	bitfield []byte
 
@@ -52,54 +17,155 @@ type Peer struct {
 	peerChoking    bool
 	peerInterested bool
 
-	writer   *PieceWriter
-	pipeline *requestPipeline
+	pipeline      *Pipeline
+	writer        chan<- PieceMessage
+	assignedPiece *Piece
+
+	// writer   *PieceWriter
+	// pipeline *requestPipeline
 
 	numOfPieces       int
 	totalLength       int
 	pieceLength       int
 	blockSize         int
-	numBlocksPerPiece int
+	numBlocksPerPiece int8
 }
 
-type requestPipeline struct {
-	reqSignal  chan struct{}
-	windowSize int
+type Pipeline struct {
+	windowSize      int
+	window          chan struct{}
+	requested       int
+	maxRequestCount int8
 }
 
-func (peer *Peer) runPipeline() {
+func NewPipeline(windowSize int, maxRequestCount int8) *Pipeline {
+	return &Pipeline{
+		windowSize:      windowSize,
+		window:          make(chan struct{}, windowSize),
+		requested:       0,
+		maxRequestCount: maxRequestCount,
+	}
+}
+
+func (peer *Peer) HasPiece(index int) bool {
+	if len(peer.bitfield) == 0 {
+		return true
+	}
+	byteIndex := index / 8
+	offset := index % 8
+	return peer.bitfield[byteIndex]>>(7-offset)&1 != 0
+}
+
+// func (peer *Peer) AssignPiece(piece *Piece) error {
+// 	piece.state = PieceAssigned
+// 	peer.pipeline.requested = 0
+// 	peer.assignedPiece = piece
+// 	return nil
+// }
+
+func (peer *Peer) StartRequestPipeline() {
 	for i := 0; i < peer.pipeline.windowSize; i++ {
-		peer.pipeline.reqSignal <- struct{}{}
+		peer.pipeline.window <- struct{}{}
 	}
 
 	lastPieceID := peer.numOfPieces - 1
 	lastBlockID := peer.pieceLength - peer.blockSize
-	currPiece := 0
-	currOffset := 0
-
-	// TODO: temporary
-	done := false
 
 	for {
-		if !done && peer.canRequest() {
-			<-peer.pipeline.reqSignal
+		fmt.Println(peer.assignedPiece,
+			peer.pipeline.requested,
+			peer.blockSize,
+			peer.pieceLength,
+			peer.canRequest())
 
-			if currOffset == lastBlockID {
-				if currPiece == lastPieceID {
-					remainder := peer.totalLength - currOffset - (lastPieceID * peer.pieceLength)
-					peer.sendRequest(currPiece, currOffset, remainder)
-					done = true
-				} else {
-					peer.sendRequest(currPiece, currOffset, peer.blockSize)
-					currPiece += 1
-					currOffset = 0
-				}
-			} else {
-				peer.sendRequest(currPiece, currOffset, peer.blockSize)
-				currOffset += peer.blockSize
+		fmt.Println("STATUS:", peer.assignedPiece != nil)
+		fmt.Println("STATUS:", peer.pipeline.requested*peer.blockSize < peer.pieceLength)
+		fmt.Println(peer.canRequest())
+
+		if peer.assignedPiece != nil &&
+			peer.pipeline.requested*peer.blockSize < peer.pieceLength &&
+			peer.canRequest() {
+			fmt.Println("USLO")
+
+			<-peer.pipeline.window
+
+			// if last block of last piece: calculate block size
+			// TODO: fix piece offset calc
+
+			index := peer.assignedPiece.index
+			block := peer.blockSize
+			begin := peer.pipeline.requested * block
+
+			if lastPieceID == index && lastBlockID == begin {
+				block = peer.totalLength - begin - (lastPieceID * peer.pieceLength)
+				fmt.Println("CALCULATED LAST BLOCK:", block)
 			}
+
+			peer.sendRequest(index, begin, block)
+
+			// blockSize := peer.blockSize
+			// if currOffset == lastBlockID {
+			// 	if currPiece == lastPieceID {
+			// 		blockSize = peer.totalLength - currOffset - (lastPieceID * peer.pieceLength)
+			// 	} else {
+			// 		currPiece += 1
+			// 		currOffset = 0
+			// 	}
+			// } else {
+			// 	currOffset += peer.blockSize
+			// }
+			// if peer.assignedPiece.state != PieceAssigned {
+			// 	peer.assignedPiece.state = PieceAssigned
+			// }
+			// peer.sendRequest(currPiece, currOffset, blockSize)
 		}
 	}
+}
+
+func (p *Peer) writeMsg(msg Message) error {
+	if _, err := p.conn.Write(msg.Bytes()); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *Peer) sendChoke() error {
+	p.amChoking = true
+	return p.writeMsg(Message{ID: MsgChoke})
+}
+
+func (p *Peer) sendUnchoke() error {
+	p.amChoking = false
+	return p.writeMsg(Message{ID: MsgUnchoke})
+}
+
+func (p *Peer) sendInterested() error {
+	fmt.Println("sending interested to peer", p.conn.RemoteAddr())
+	p.amInterested = true
+	return p.writeMsg(Message{ID: MsgInterested})
+}
+
+func (p *Peer) sendUninterested() error {
+	p.amInterested = false
+	return p.writeMsg(Message{ID: MsgUninterested})
+}
+
+func (p *Peer) sendHave() error {
+	// return p.writeMsg(Message{ID: MsgHave, Payload: []byte()})
+	return nil
+}
+
+func (p *Peer) sendRequest(index, begin, block int) error {
+	// TODO: before requesting, we need to ask the peer if it has that piece
+	fmt.Println("[REQUEST] request piece:", index, begin, block)
+
+	p.pipeline.requested++
+	if p.assignedPiece.state != PieceInFlight {
+		p.assignedPiece.state = PieceInFlight
+	}
+
+	payload := FormatRequest(index, begin, block)
+	return p.writeMsg(Message{ID: MsgRequest, Payload: payload})
 }
 
 func (p *Peer) canRequest() bool {
@@ -110,7 +176,8 @@ func (p *Peer) Close() error {
 	return p.conn.Close()
 }
 
-func (p *Peer) readMessages() error {
+func (p *Peer) ReadMessages() error {
+	fmt.Println("Reading messages for peer:", p.conn.RemoteAddr())
 	for {
 		msg, err := ReadMessage(p.conn)
 		if err != nil {
@@ -143,9 +210,11 @@ func (p *Peer) readMessages() error {
 			p.bitfield = msg.Payload
 		case MsgPiece:
 			piece := ParsePieceMessage(msg.Payload)
-			fmt.Printf("[PIECE] index %d, begin %d, blocks %d\n", piece.index, piece.begin, len(piece.block))
-			p.pipeline.reqSignal <- struct{}{}
-			p.writer.worker <- piece
+			fmt.Printf("[MESSAGE] piece: index %d, begin %d, blocks %d\n", piece.index, piece.begin, len(piece.block))
+
+			p.pipeline.window <- struct{}{}
+			p.writer <- piece
+
 		case MsgHave:
 			fmt.Println("[MESSAGE] have")
 		case MsgCancel:
@@ -156,13 +225,13 @@ func (p *Peer) readMessages() error {
 	}
 }
 
-func handshake(conn net.Conn, hs *Handshake) error {
-	_, err := conn.Write(hs.Bytes())
+func (p *Peer) initiateHandshake(hs *Handshake) error {
+	_, err := p.conn.Write(hs.Bytes())
 	if err != nil {
 		return fmt.Errorf("failed to write handshake: %v", err)
 	}
 
-	peerHandshake, err := ReadHandshake(conn)
+	peerHandshake, err := ReadHandshake(p.conn)
 	if err != nil {
 		return fmt.Errorf("failed to read handshake: %v", err)
 	}
@@ -175,112 +244,8 @@ func handshake(conn net.Conn, hs *Handshake) error {
 	}
 
 	if peerHandshake.InfoHash != hs.InfoHash {
-		return fmt.Errorf("handshake: info hashes do not match: %s", conn.RemoteAddr())
+		return fmt.Errorf("handshake: info hashes do not match: %s", p.conn.RemoteAddr())
 	}
 
 	return nil
-}
-
-func (p *Peer) Work(
-	conn net.Conn,
-	pieces [][20]byte,
-	totalLength int,
-	pieceLength int,
-	files []*FileEntry,
-) error {
-	blockSize := int(math.Pow(2, 14))
-
-	peer := &Peer{
-		conn:              conn,
-		amInterested:      false,
-		peerChoking:       true,
-		numOfPieces:       len(pieces),
-		totalLength:       totalLength,
-		pieceLength:       pieceLength,
-		blockSize:         blockSize,
-		numBlocksPerPiece: pieceLength / blockSize,
-	}
-
-	peer.writer = &PieceWriter{
-		blockSize:         peer.blockSize,
-		numBlocksPerPiece: peer.numBlocksPerPiece,
-		pieceLength:       peer.pieceLength,
-		totalLength:       peer.totalLength,
-		hashedPieces:      pieces,
-		numWorkers:        3,
-		worker:            make(chan PieceMessage),
-		pieces:            make(map[int]*piece),
-		files:             files,
-	}
-
-	peer.pipeline = &requestPipeline{
-		windowSize: 4,
-		reqSignal:  make(chan struct{}, 4),
-	}
-
-	if err := peer.sendInterested(); err != nil {
-		return err
-	}
-
-	go peer.runPipeline()
-	go peer.writer.Start()
-
-	return peer.readMessages()
-}
-
-func DialPeer(addr string, hs *Handshake, tf *TorrentFile) error {
-	fmt.Println("Dialing peer:", addr)
-
-	conn, err := net.DialTimeout("tcp", addr, time.Second*5)
-	if err != nil {
-		return fmt.Errorf("failed to dial: %v", err)
-	}
-
-	if err := handshake(conn, hs); err != nil {
-		if err := conn.Close(); err != nil {
-			return err
-		}
-		return err
-	}
-
-	fmt.Println("Handshake successful with peer:", addr)
-
-	blockSize := int(math.Pow(2, 14))
-
-	peer := &Peer{
-		conn:              conn,
-		amInterested:      false,
-		peerChoking:       true,
-		numOfPieces:       len(tf.Pieces),
-		totalLength:       tf.TotalLength,
-		pieceLength:       tf.PieceLength,
-		blockSize:         blockSize,
-		numBlocksPerPiece: tf.PieceLength / blockSize,
-	}
-
-	peer.writer = &PieceWriter{
-		blockSize:         peer.blockSize,
-		numBlocksPerPiece: peer.numBlocksPerPiece,
-		pieceLength:       peer.pieceLength,
-		totalLength:       peer.totalLength,
-		hashedPieces:      tf.Pieces,
-		numWorkers:        3,
-		worker:            make(chan PieceMessage),
-		pieces:            make(map[int]*piece),
-		files:             tf.Files,
-	}
-
-	peer.pipeline = &requestPipeline{
-		windowSize: 4,
-		reqSignal:  make(chan struct{}, 4),
-	}
-
-	if err := peer.sendInterested(); err != nil {
-		return err
-	}
-
-	go peer.runPipeline()
-	go peer.writer.Start()
-
-	return peer.readMessages()
 }

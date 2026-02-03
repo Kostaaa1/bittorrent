@@ -6,82 +6,91 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 type pieceState int
 
 const (
-	pieceMissing pieceState = iota
-	pieceDownloading
-	pieceCompleted
+	PieceMissing pieceState = iota
+	PieceAssigned
+	PieceInFlight
+	PieceDownloaded
 )
 
-type piece struct {
-	// to check if its written the number of times of blocks in single piece
-	blockCount int
+type Piece struct {
+	index int
+	state pieceState
+	size  int
+	hash  [20]byte
+	// NOTE: revisit, blockCount might be bad
+	blockCount int8
 	buffer     []byte
 }
 
-func (p *piece) writeBlock(begin int, block []byte) {
+func NewPiece(index int, hash [20]byte, length int) *Piece {
+	return &Piece{
+		index: index,
+		hash:  hash,
+		size:  length,
+	}
+}
+
+func (p *Piece) write(begin int, block []byte) {
 	copy(p.buffer[begin:], block)
 	p.blockCount++
 }
+func (p *Piece) verify() bool { return sha1.Sum(p.buffer) == p.hash }
+func (p *Piece) alloc()       { p.buffer = make([]byte, p.size) }
 
 type PieceWriter struct {
-	hashedPieces      [][20]byte
 	numWorkers        int
-	numBlocksPerPiece int
-	totalLength       int
+	numBlocksPerPiece int8
 	pieceLength       int
-	blockSize         int
 	worker            chan PieceMessage
-	pieces            map[int]*piece
+	pieces            map[int]*Piece
 	files             []*FileEntry
+	results           chan<- Result
 }
 
-func (pw *PieceWriter) pieceSize(pieceIndex int) int {
-	lastPiece := len(pw.hashedPieces) - 1
-	if pieceIndex == lastPiece {
-		return pw.totalLength - (lastPiece * pw.pieceLength)
+func (pw *PieceWriter) writeBlock(msg PieceMessage) *Piece {
+	piece := pw.pieces[msg.index]
+	if piece.buffer == nil {
+		piece.alloc()
 	}
-	return pw.pieceLength
-}
-
-func (pw *PieceWriter) findOrAssignPiece(pieceIndex int) *piece {
-	if block, ok := pw.pieces[pieceIndex]; ok {
-		return block
-	}
-	size := pw.pieceSize(pieceIndex)
-
-	pw.pieces[pieceIndex] = &piece{
-		blockCount: 0,
-		buffer:     make([]byte, size),
-	}
-
-	return pw.pieces[pieceIndex]
+	piece.write(msg.begin, msg.block)
+	return piece
 }
 
 func (pw *PieceWriter) Start() error {
-	for msg := range pw.worker {
-		piece := pw.findOrAssignPiece(msg.index)
-		piece.writeBlock(msg.begin, msg.block)
+	var wg sync.WaitGroup
 
-		// NOTE: revisit this and possibly find better way of veyfing if its the last block that is missing.
-		if piece.blockCount == pw.numBlocksPerPiece {
-			// TODO: need to notify the network layer if verification succeeds or fails. USE SEPARATE CHANNEL
-			if sha1.Sum(piece.buffer) != pw.hashedPieces[msg.index] {
-				return fmt.Errorf("hashes do not match for piece %d", msg.index)
+	for i := 0; i < pw.numWorkers; i++ {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			for msg := range pw.worker {
+				piece := pw.writeBlock(msg)
+
+				if piece.blockCount == pw.numBlocksPerPiece {
+					result := Result{
+						Index: msg.index,
+						Begin: msg.begin,
+					}
+
+					if !piece.verify() {
+						result.Err = fmt.Errorf("hashes do not match for piece %d", msg.index)
+						pw.results <- result
+					} else if _, err := pw.WritePiece(msg.index, piece.buffer); err != nil {
+						result.Err = err
+					}
+
+					pw.results <- result
+				}
 			}
-
-			fmt.Printf("[VERIFIED] Writing - piece: %d, block: %d\n", msg.index, len(msg.block))
-
-			// NOTE: What if writing of the piece fails, how to recover?
-			if _, err := pw.WritePiece(msg.index, piece.buffer); err != nil {
-				fmt.Println("failed to write piece buffer to file:", err)
-				return err
-			}
-			delete(pw.pieces, msg.index)
-		}
+		}()
 	}
 
 	return nil
@@ -101,6 +110,8 @@ func (w *PieceWriter) getFileEntry(pieceIndex int) (entry *FileEntry, id int, er
 }
 
 func (w *PieceWriter) WritePiece(pieceIndex int, piece []byte) (int, error) {
+	fmt.Printf("[VERIFIED] writing piece: index=%d\n", pieceIndex)
+
 	entry, fileID, err := w.getFileEntry(pieceIndex)
 	if err != nil {
 		return 0, err
@@ -132,7 +143,6 @@ func (w *PieceWriter) WritePiece(pieceIndex int, piece []byte) (int, error) {
 			log.Fatal("failed to writeAt", entry.FullPath, err)
 		}
 
-		////////////////
 		// TODO: This still has bugs
 		// Write as long as remainder buffer can be written to file
 		for remainderLen > 0 {

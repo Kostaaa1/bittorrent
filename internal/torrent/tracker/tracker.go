@@ -10,46 +10,20 @@ type tracker struct {
 	infoHash       [20]byte
 	classification string
 	isSecure       bool
-	peerCh         <-chan peerInfo
+	peerCh         <-chan PeerAddress
 }
 
-func New(trackerURL string, infoHash [20]byte, peerCh <-chan peerInfo) (*tracker, error) {
+func New(trackerURL string, infoHash [20]byte, peerCh <-chan PeerAddress) (*tracker, error) {
 	parsed, err := url.Parse(trackerURL)
 	if err != nil {
 		return nil, err
 	}
 
-	t := &tracker{
-		url:      parsed,
-		infoHash: infoHash,
-	}
-
+	t := &tracker{url: parsed, infoHash: infoHash}
 	t.classifyTracker()
 
 	return t, nil
 }
-
-// func (t *tracker) Announce(peerID [20]byte, port uint16) error {
-// 	params := HTTPTrackerRequestParams{
-// 		Tracker:  t.url.String(),
-// 		InfoHash: t.infoHash,
-// 		PeerID:   peerID,
-// 		Port:     port,
-// 		Uploaded:   0,
-// 		Downloaded: 0,
-// 		Left:       0,
-// 		Compact:  0,
-// 		NoPeerID: 1,
-// 	}
-
-// 	u, err := buildHTTPTrackerURL(params)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	http.Get(u)
-
-// }
 
 func (t *tracker) classifyTracker() error {
 	switch t.url.Scheme {
