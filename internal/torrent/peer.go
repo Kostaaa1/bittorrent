@@ -56,13 +56,6 @@ func (peer *Peer) HasPiece(index int) bool {
 	return peer.bitfield[byteIndex]>>(7-offset)&1 != 0
 }
 
-// func (peer *Peer) AssignPiece(piece *Piece) error {
-// 	piece.state = PieceAssigned
-// 	peer.pipeline.requested = 0
-// 	peer.assignedPiece = piece
-// 	return nil
-// }
-
 func (peer *Peer) StartRequestPipeline() {
 	for i := 0; i < peer.pipeline.windowSize; i++ {
 		peer.pipeline.window <- struct{}{}
@@ -72,20 +65,9 @@ func (peer *Peer) StartRequestPipeline() {
 	lastBlockID := peer.pieceLength - peer.blockSize
 
 	for {
-		fmt.Println(peer.assignedPiece,
-			peer.pipeline.requested,
-			peer.blockSize,
-			peer.pieceLength,
-			peer.canRequest())
-
-		fmt.Println("STATUS:", peer.assignedPiece != nil)
-		fmt.Println("STATUS:", peer.pipeline.requested*peer.blockSize < peer.pieceLength)
-		fmt.Println(peer.canRequest())
-
 		if peer.assignedPiece != nil &&
 			peer.pipeline.requested*peer.blockSize < peer.pieceLength &&
 			peer.canRequest() {
-			fmt.Println("USLO")
 
 			<-peer.pipeline.window
 

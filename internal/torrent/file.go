@@ -19,18 +19,30 @@ type Result struct {
 }
 
 type PieceManager struct {
-	unassignedPieces chan *Piece
-	assigned         map[int]int
-	// piece index -> peer index - O(1)
-
+	unassignedPieces  chan *Piece
+	assigned          map[int]int
 	blockSize         int
 	numBlocksPerPiece int8
 	writer            *PieceWriter
 	results           chan Result
 	peerAutoIncrement int
+	peers             []*Peer
+}
 
-	// not needed prob
-	peers []*Peer
+func (pm *PieceManager) assignPiece(peer *Peer) {
+	// TODO: check if peer has the piece?
+	piece := <-pm.unassignedPieces
+	peer.assignedPiece = piece
+	pm.assigned[piece.index] = peer.ID
+	peer.pipeline.requested = 0
+	fmt.Printf("[ASSIGN] piece index=%d, peer=%s\n", piece.index, peer.conn.RemoteAddr())
+}
+
+func (pm *PieceManager) unassignPiece(peer *Peer, piece *Piece) {
+	piece.state = PieceMissing
+	pm.unassignedPieces <- piece
+	delete(pm.assigned, piece.index)
+	peer.assignedPiece = nil
 }
 
 type FileEntry struct {
@@ -178,20 +190,20 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 		defer wg.Done()
 		for {
 			for result := range pm.results {
-				fmt.Println("Received:", result)
-				peerID := pm.assigned[result.Index]
-
-				fmt.Println("PEER ID:", peerID)
-
-				for _, peer := range pm.peers {
-					fmt.Println("Peer iterat:", peer.ID)
-					if peer.ID == peerID {
-						piece := <-pm.unassignedPieces
-						fmt.Println("[ASSIGN] assign piece", peer.conn.RemoteAddr(), piece.index)
-						peer.assignedPiece = piece
-						fmt.Println("Assigned piece: ", peer.assignedPiece)
-						pm.assigned[piece.index] = peer.ID
-						fmt.Println("Assigned: ", pm.assigned)
+				if result.Err != nil {
+					// piece write failed
+					// unassign/reassign ?
+					// state to missing/assigned
+				} else {
+					peerID := pm.assigned[result.Index]
+					for _, peer := range pm.peers {
+						if peer.ID == peerID {
+							pm.assignPiece(peer)
+							// piece := <-pm.unassignedPieces
+							// peer.assignedPiece = piece
+							// pm.assigned[piece.index] = peer.ID
+							// peer.pipeline.requested = 0
+						}
 					}
 				}
 			}
@@ -250,6 +262,7 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 				piece := <-pm.unassignedPieces
 				peer.assignedPiece = piece
 				pm.assigned[piece.index] = peer.ID
+
 				pm.peers = append(pm.peers, peer)
 
 				if err := peer.sendInterested(); err != nil {
