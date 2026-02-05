@@ -3,13 +3,35 @@ package torrent
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
+	"time"
 )
 
+type Bitfield []byte
+
+func (b Bitfield) HasPiece(index int) bool {
+	if b == nil {
+		return true
+	}
+	byteIndex := index / 8
+	offset := index % 8
+	return b[byteIndex]>>(7-offset)&1 == 1
+}
+
+func (b Bitfield) SetPiece(index int) bool {
+	return false
+}
+
+// Peer edge cases
+// 1. Chokes mid piece: need to place assigned piece back to queue and reaasign new piece
+// 2. Peer disconnects mid-piece:
+// 3. Slow peer - timeouts or reassigning pieces to faster peers, keep track of response time.
+// 4. Request pipeline - sliding window algorithm, the peer needs to request blocks from outside of assigned pieces. It needs an ability to assign pieces by itself, need to check for remaining window requests and request for the next available piece. this is problematic cause peer manager assi
 type Peer struct {
 	ID       int
 	conn     net.Conn
-	bitfield []byte
+	bitfield Bitfield
 
 	// peer state
 	amChoking      bool
@@ -19,133 +41,101 @@ type Peer struct {
 
 	pipeline      *Pipeline
 	writer        chan<- PieceMessage
-	assignedPiece *Piece
+	assignedPiece *int
 
-	// writer   *PieceWriter
-	// pipeline *requestPipeline
+	keepAliveTickInterval time.Duration
 
 	numOfPieces       int
 	totalLength       int
 	pieceLength       int
 	blockSize         int
 	numBlocksPerPiece int8
+
+	log *slog.Logger
+}
+
+// Closes and clears resources
+// connection, keep alive ticker
+func (peer *Peer) Close() {}
+
+func (peer *Peer) AssignPiece(pieceIndex int) bool {
+	if !peer.bitfield.HasPiece(pieceIndex) {
+		return false
+	}
+	peer.log.Debug("[ASSIGN]", "piece", pieceIndex)
+	peer.assignedPiece = &pieceIndex
+	return true
 }
 
 type Pipeline struct {
-	windowSize      int
-	window          chan struct{}
-	requested       int
-	maxRequestCount int8
+	windowSize int
+	inflight   int
+	nextBlock  int
 }
 
-func NewPipeline(windowSize int, maxRequestCount int8) *Pipeline {
-	return &Pipeline{
-		windowSize:      windowSize,
-		window:          make(chan struct{}, windowSize),
-		requested:       0,
-		maxRequestCount: maxRequestCount,
-	}
+func NewPipeline(windowSize int) *Pipeline {
+	return &Pipeline{windowSize: windowSize}
 }
 
-func (peer *Peer) HasPiece(index int) bool {
-	if len(peer.bitfield) == 0 {
-		return true
-	}
-	byteIndex := index / 8
-	offset := index % 8
-	return peer.bitfield[byteIndex]>>(7-offset)&1 != 0
-}
+func (p *Pipeline) fillWindow() {}
 
-func (peer *Peer) StartRequestPipeline() {
-	for i := 0; i < peer.pipeline.windowSize; i++ {
-		peer.pipeline.window <- struct{}{}
-	}
+func (peer *Peer) SendRequest() {
+	index := *peer.assignedPiece
+	begin := peer.pipeline.nextBlock * peer.blockSize
+	blockLen := peer.blockSize
 
 	lastPieceID := peer.numOfPieces - 1
-	lastBlockID := peer.pieceLength - peer.blockSize
-
-	for {
-		if peer.assignedPiece != nil &&
-			peer.pipeline.requested*peer.blockSize < peer.pieceLength &&
-			peer.canRequest() {
-
-			<-peer.pipeline.window
-
-			// if last block of last piece: calculate block size
-			// TODO: fix piece offset calc
-
-			index := peer.assignedPiece.index
-			block := peer.blockSize
-			begin := peer.pipeline.requested * block
-
-			if lastPieceID == index && lastBlockID == begin {
-				block = peer.totalLength - begin - (lastPieceID * peer.pieceLength)
-				fmt.Println("CALCULATED LAST BLOCK:", block)
-			}
-
-			peer.sendRequest(index, begin, block)
-
-			// blockSize := peer.blockSize
-			// if currOffset == lastBlockID {
-			// 	if currPiece == lastPieceID {
-			// 		blockSize = peer.totalLength - currOffset - (lastPieceID * peer.pieceLength)
-			// 	} else {
-			// 		currPiece += 1
-			// 		currOffset = 0
-			// 	}
-			// } else {
-			// 	currOffset += peer.blockSize
-			// }
-			// if peer.assignedPiece.state != PieceAssigned {
-			// 	peer.assignedPiece.state = PieceAssigned
-			// }
-			// peer.sendRequest(currPiece, currOffset, blockSize)
+	if index == lastPieceID {
+		remaining := peer.totalLength - (lastPieceID * peer.pieceLength) - begin
+		if remaining < blockLen {
+			blockLen = remaining
 		}
 	}
+
+	peer.pipeline.inflight++
+	peer.pipeline.nextBlock++
+
+	peer.sendRequest(index, begin, blockLen)
 }
 
 func (p *Peer) writeMsg(msg Message) error {
 	if _, err := p.conn.Write(msg.Bytes()); err != nil {
+		p.log.Error("write failed", "err", err)
 		return err
 	}
 	return nil
 }
 
-func (p *Peer) sendChoke() error {
+func (p *Peer) sendChoke() {
 	p.amChoking = true
-	return p.writeMsg(Message{ID: MsgChoke})
+	p.writeMsg(Message{ID: MsgChoke})
 }
 
-func (p *Peer) sendUnchoke() error {
+func (p *Peer) sendUnchoke() {
 	p.amChoking = false
-	return p.writeMsg(Message{ID: MsgUnchoke})
+	p.writeMsg(Message{ID: MsgUnchoke})
 }
 
-func (p *Peer) sendInterested() error {
-	fmt.Println("sending interested to peer", p.conn.RemoteAddr())
+func (p *Peer) sendInterested() {
 	p.amInterested = true
-	return p.writeMsg(Message{ID: MsgInterested})
+	p.writeMsg(Message{ID: MsgInterested})
 }
 
-func (p *Peer) sendUninterested() error {
+func (p *Peer) sendUninterested() {
 	p.amInterested = false
-	return p.writeMsg(Message{ID: MsgUninterested})
+	p.writeMsg(Message{ID: MsgUninterested})
 }
 
-func (p *Peer) sendHave() error {
+func (p *Peer) sendKeepAlive() {
+	p.writeMsg(Message{})
+}
+
+func (p *Peer) sendHave() {
 	// return p.writeMsg(Message{ID: MsgHave, Payload: []byte()})
-	return nil
 }
 
 func (p *Peer) sendRequest(index, begin, block int) error {
-	// TODO: before requesting, we need to ask the peer if it has that piece
-	fmt.Println("[REQUEST] request piece:", index, begin, block)
-
-	p.pipeline.requested++
-	if p.assignedPiece.state != PieceInFlight {
-		p.assignedPiece.state = PieceInFlight
-	}
-
+	p.log.Debug("[REQUEST]", "piece", index, "begin", begin, "block", block, "inflight", p.pipeline.inflight)
 	payload := FormatRequest(index, begin, block)
 	return p.writeMsg(Message{ID: MsgRequest, Payload: payload})
 }
@@ -154,12 +144,24 @@ func (p *Peer) canRequest() bool {
 	return p.amInterested && !p.peerChoking
 }
 
-func (p *Peer) Close() error {
-	return p.conn.Close()
-}
-
 func (p *Peer) ReadMessages() error {
-	fmt.Println("Reading messages for peer:", p.conn.RemoteAddr())
+	if p.keepAliveTickInterval == 0 {
+		p.keepAliveTickInterval = time.Minute
+	}
+
+	p.log = slog.With("peer", p.conn.RemoteAddr())
+
+	p.sendInterested()
+
+	ticker := time.NewTicker(p.keepAliveTickInterval)
+	defer ticker.Stop()
+	go func() {
+		for {
+			<-ticker.C
+			p.sendKeepAlive()
+		}
+	}()
+
 	for {
 		msg, err := ReadMessage(p.conn)
 		if err != nil {
@@ -173,36 +175,45 @@ func (p *Peer) ReadMessages() error {
 		case MsgChoke:
 			// clear pending requests
 			// notify piece Worker that pending requests are dead
-			fmt.Println("[MESSAGE] choke")
+			// reassign piece
+			// push piece back to queue
+			p.log.Debug("[CHOKE]")
 			p.peerChoking = true
 		case MsgUnchoke:
-			fmt.Println("[MESSAGE] unchoke")
+			p.log.Debug("[UNCHOKE]")
 			p.peerChoking = false
+			p.pipeline.fillWindow()
 		case MsgInterested:
-			fmt.Println("[MESSAGE] interested")
+			p.log.Debug("[INTERESTED]")
 			p.peerInterested = true
 		case MsgUninterested:
-			fmt.Println("[MESSAGE] uninterested")
+			p.log.Debug("[UNINTERESTED]")
 			p.peerInterested = false
 		case MsgBitfield:
-			fmt.Println("[MESSAGE] bitfield", msg.Payload)
+			p.log.Debug("[BITFIELD]")
 			p.bitfield = msg.Payload
 		case MsgRequest:
-			fmt.Println("[MESSAGE] request")
+			p.log.Debug("[REQUEST]")
 			p.bitfield = msg.Payload
 		case MsgPiece:
 			piece := ParsePieceMessage(msg.Payload)
-			fmt.Printf("[MESSAGE] piece: index %d, begin %d, blocks %d\n", piece.index, piece.begin, len(piece.block))
 
-			p.pipeline.window <- struct{}{}
+			p.log.Debug(
+				"[PIECE]",
+				"piece", piece.index,
+				"begin", piece.begin,
+				"len", len(piece.block),
+				"inflight", p.pipeline.inflight-1,
+			)
+
 			p.writer <- piece
 
 		case MsgHave:
-			fmt.Println("[MESSAGE] have")
+			p.log.Debug("[REQUEST]")
 		case MsgCancel:
-			fmt.Println("[MESSAGE] cancel")
+			p.log.Debug("[CANCEL]")
 		case MsgPort:
-			fmt.Println("[MESSAGE] port")
+			p.log.Debug("[PORT]")
 		}
 	}
 }

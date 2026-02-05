@@ -6,91 +6,84 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sync"
 )
 
-type pieceState int
-
-const (
-	PieceMissing pieceState = iota
-	PieceAssigned
-	PieceInFlight
-	PieceDownloaded
-)
-
-type Piece struct {
-	index int
-	state pieceState
-	size  int
-	hash  [20]byte
-	// NOTE: revisit, blockCount might be bad
-	blockCount int8
+type PieceBuffer struct {
+	index      int
+	size       int
+	hash       [20]byte
 	buffer     []byte
+	blockCount int8
 }
 
-func NewPiece(index int, hash [20]byte, length int) *Piece {
-	return &Piece{
-		index: index,
-		hash:  hash,
-		size:  length,
-	}
-}
-
-func (p *Piece) write(begin int, block []byte) {
-	copy(p.buffer[begin:], block)
-	p.blockCount++
-}
-func (p *Piece) verify() bool { return sha1.Sum(p.buffer) == p.hash }
-func (p *Piece) alloc()       { p.buffer = make([]byte, p.size) }
+//	func (p *PieceBuffer) write(begin int, block []byte) {
+//		copy(p.buffer[begin:], block)
+//		p.blockCount++
+//	}
+func (p *PieceBuffer) verify() bool { return sha1.Sum(p.buffer) == p.hash }
 
 type PieceWriter struct {
-	numWorkers        int
 	numBlocksPerPiece int8
+	numOfPieces       int
+	totalLength       int
 	pieceLength       int
+	hashPieces        [][20]byte
 	worker            chan PieceMessage
-	pieces            map[int]*Piece
+	pieces            map[int]*PieceBuffer
 	files             []*FileEntry
 	results           chan<- Result
 }
 
-func (pw *PieceWriter) writeBlock(msg PieceMessage) *Piece {
-	piece := pw.pieces[msg.index]
-	if piece.buffer == nil {
-		piece.alloc()
+func (pw *PieceWriter) getPieceSize(pieceIndex int) int {
+	size := pw.pieceLength
+	lastPiece := pw.numOfPieces - 1
+	if pieceIndex == lastPiece {
+		size = pw.totalLength - (lastPiece * pw.pieceLength)
 	}
-	piece.write(msg.begin, msg.block)
+	return size
+}
+
+func (pw *PieceWriter) writeBlock(msg PieceMessage) *PieceBuffer {
+	piece := pw.pieces[msg.index]
+
+	if piece == nil {
+		size := pw.getPieceSize(msg.index)
+		piece = &PieceBuffer{
+			index:      msg.index,
+			blockCount: 0,
+			size:       size,
+			buffer:     make([]byte, size),
+			hash:       pw.hashPieces[msg.index],
+		}
+	}
+
+	copy(piece.buffer[msg.begin:], msg.block)
+	piece.blockCount++
+
+	pw.pieces[msg.index] = piece
+
 	return piece
 }
 
 func (pw *PieceWriter) Start() error {
-	var wg sync.WaitGroup
+	for msg := range pw.worker {
+		piece := pw.writeBlock(msg)
 
-	for i := 0; i < pw.numWorkers; i++ {
-		wg.Add(1)
-
-		go func() {
-			defer wg.Done()
-
-			for msg := range pw.worker {
-				piece := pw.writeBlock(msg)
-
-				if piece.blockCount == pw.numBlocksPerPiece {
-					result := Result{
-						Index: msg.index,
-						Begin: msg.begin,
-					}
-
-					if !piece.verify() {
-						result.Err = fmt.Errorf("hashes do not match for piece %d", msg.index)
-						pw.results <- result
-					} else if _, err := pw.WritePiece(msg.index, piece.buffer); err != nil {
-						result.Err = err
-					}
-
-					pw.results <- result
-				}
+		if piece.blockCount == pw.numBlocksPerPiece {
+			result := Result{
+				Index: msg.index,
+				Begin: msg.begin,
 			}
-		}()
+
+			if !piece.verify() {
+				result.Err = fmt.Errorf("hashes do not match for piece %d", msg.index)
+				pw.results <- result
+			} else if _, err := pw.WritePiece(msg.index, piece.buffer); err != nil {
+				result.Err = err
+			}
+
+			pw.results <- result
+		}
 	}
 
 	return nil
@@ -110,8 +103,6 @@ func (w *PieceWriter) getFileEntry(pieceIndex int) (entry *FileEntry, id int, er
 }
 
 func (w *PieceWriter) WritePiece(pieceIndex int, piece []byte) (int, error) {
-	fmt.Printf("[VERIFIED] writing piece: index=%d\n", pieceIndex)
-
 	entry, fileID, err := w.getFileEntry(pieceIndex)
 	if err != nil {
 		return 0, err

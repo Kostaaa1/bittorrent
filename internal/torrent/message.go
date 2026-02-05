@@ -3,6 +3,7 @@ package torrent
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 )
 
@@ -47,6 +48,7 @@ func ReadMessage(r io.Reader) (*Message, error) {
 	}
 
 	if length == 0 {
+		fmt.Println("[ERROR] LENGTH 0")
 		return nil, errors.New("length is zero")
 	}
 
