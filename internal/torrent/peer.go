@@ -11,9 +11,6 @@ import (
 type Bitfield []byte
 
 func (b Bitfield) HasPiece(index int) bool {
-	if b == nil {
-		return true
-	}
 	byteIndex := index / 8
 	offset := index % 8
 	return b[byteIndex]>>(7-offset)&1 == 1
@@ -21,6 +18,55 @@ func (b Bitfield) HasPiece(index int) bool {
 
 func (b Bitfield) SetPiece(index int) bool {
 	return false
+}
+
+type pipeline struct {
+	windowSize int
+	inflight   int
+	nextBlock  int
+}
+
+func NewPipeline(windowSize int) *pipeline {
+	return &pipeline{windowSize: windowSize}
+}
+
+func (p *pipeline) canRequest() bool {
+	return p.inflight < p.windowSize
+}
+
+func (peer *Peer) dispatchRequests() {
+	if !peer.canRequest() {
+		return
+	}
+	if !peer.pipeline.canRequest() {
+		return
+	}
+
+	for peer.pipeline.inflight < peer.pipeline.windowSize {
+		index := *peer.assignedPiece
+		begin := peer.pipeline.nextBlock * peer.blockSize
+		blockLen := peer.blockSize
+
+		lastPieceID := peer.numOfPieces - 1
+
+		if index == lastPieceID {
+			remaining := peer.totalLength - (lastPieceID * peer.pieceLength) - begin
+			if remaining < blockLen {
+				blockLen = remaining
+			}
+		}
+
+		peer.sendRequest(index, begin, blockLen)
+
+		peer.pipeline.inflight++
+		peer.pipeline.nextBlock++
+
+		if peer.pipeline.nextBlock >= int(peer.numBlocksPerPiece) {
+			peer.pipeline.nextBlock = 0
+			// TODO: assign next available piece (THAT THIS PEER HAVE AND THAT'S NOT DOWNLOADED OR ASSIGNED by another peer) to the peer
+			peer.AssignPiece(index + 1)
+		}
+	}
 }
 
 // Peer edge cases
@@ -33,13 +79,12 @@ type Peer struct {
 	conn     net.Conn
 	bitfield Bitfield
 
-	// peer state
 	amChoking      bool
 	amInterested   bool
 	peerChoking    bool
 	peerInterested bool
 
-	pipeline      *Pipeline
+	pipeline      *pipeline
 	writer        chan<- PieceMessage
 	assignedPiece *int
 
@@ -59,43 +104,12 @@ type Peer struct {
 func (peer *Peer) Close() {}
 
 func (peer *Peer) AssignPiece(pieceIndex int) bool {
-	if !peer.bitfield.HasPiece(pieceIndex) {
+	if peer.bitfield != nil && !peer.bitfield.HasPiece(pieceIndex) {
 		return false
 	}
 	peer.log.Debug("[ASSIGN]", "piece", pieceIndex)
 	peer.assignedPiece = &pieceIndex
 	return true
-}
-
-type Pipeline struct {
-	windowSize int
-	inflight   int
-	nextBlock  int
-}
-
-func NewPipeline(windowSize int) *Pipeline {
-	return &Pipeline{windowSize: windowSize}
-}
-
-func (p *Pipeline) fillWindow() {}
-
-func (peer *Peer) SendRequest() {
-	index := *peer.assignedPiece
-	begin := peer.pipeline.nextBlock * peer.blockSize
-	blockLen := peer.blockSize
-
-	lastPieceID := peer.numOfPieces - 1
-	if index == lastPieceID {
-		remaining := peer.totalLength - (lastPieceID * peer.pieceLength) - begin
-		if remaining < blockLen {
-			blockLen = remaining
-		}
-	}
-
-	peer.pipeline.inflight++
-	peer.pipeline.nextBlock++
-
-	peer.sendRequest(index, begin, blockLen)
 }
 
 func (p *Peer) writeMsg(msg Message) error {
@@ -141,7 +155,7 @@ func (p *Peer) sendRequest(index, begin, block int) error {
 }
 
 func (p *Peer) canRequest() bool {
-	return p.amInterested && !p.peerChoking
+	return p.assignedPiece != nil && p.amInterested && !p.peerChoking
 }
 
 func (p *Peer) ReadMessages() error {
@@ -182,7 +196,7 @@ func (p *Peer) ReadMessages() error {
 		case MsgUnchoke:
 			p.log.Debug("[UNCHOKE]")
 			p.peerChoking = false
-			p.pipeline.fillWindow()
+			p.dispatchRequests()
 		case MsgInterested:
 			p.log.Debug("[INTERESTED]")
 			p.peerInterested = true
@@ -197,16 +211,18 @@ func (p *Peer) ReadMessages() error {
 			p.bitfield = msg.Payload
 		case MsgPiece:
 			piece := ParsePieceMessage(msg.Payload)
+			p.pipeline.inflight--
+			p.pipeline.inflight--
+			p.dispatchRequests()
+			p.writer <- piece
 
 			p.log.Debug(
 				"[PIECE]",
 				"piece", piece.index,
 				"begin", piece.begin,
 				"len", len(piece.block),
-				"inflight", p.pipeline.inflight-1,
+				// "inflight", p.pipeline.inflight,
 			)
-
-			p.writer <- piece
 
 		case MsgHave:
 			p.log.Debug("[REQUEST]")

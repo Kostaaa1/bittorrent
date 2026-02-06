@@ -20,8 +20,8 @@ type Result struct {
 }
 
 type PieceManager struct {
-	unassignedPieces  chan int
-	assigned          map[int]*Peer
+	failedPieces      chan int
+	assigned          map[int]int // TODO: piece ID -> peer ID instead
 	numBlocksPerPiece int8
 	writer            *PieceWriter
 	results           chan Result
@@ -29,24 +29,31 @@ type PieceManager struct {
 	peer              []*Peer
 }
 
+// Problem: Peers needs to assign pieces for themselves, so when peer assign the piece, it should notify the manager that that piece is being reserved by peer
+
+// Solution 1:
+// We need to ditch the logic of piece manager to assign pieces to peers on successfully downloaded pieces. Only assign to peers when the download fails.
+
+// before peer assigns the next piece that it has, check if its reserved or downloaded previously by other peer. Iterate until it finds the next available piece?
+
+// notify piece manager (via channel) every time peer assigns new piece to itself, use map[pieceIndex]peerIndex for assigned pieces in piece manager.
+
+// when download of piece fails for some reason, then:
+// MARK PIECE MISSING - delete (or mark that failed) in map - means that piece is missing
+// find the peer that has the piece
+// send piece index to peer individual queue
+
 // MUST NOT FAIL, ALWAYS NEEDS TO ASSIGN SOME PIECE
 func (pm *PieceManager) assignPiece(peer *Peer) {
-	pieceIndex := <-pm.unassignedPieces
-	ok := peer.AssignPiece(pieceIndex)
-	if !ok {
-		pm.unassignedPieces <- pieceIndex
-		pm.assignPiece(peer)
-		return
-	}
-	pm.assigned[pieceIndex] = peer
+	// pieceIndex := <-pm.unassignedPieces
+	// ok := peer.AssignPiece(pieceIndex)
+	// if !ok {
+	// 	pm.unassignedPieces <- pieceIndex
+	// 	pm.assignPiece(peer)
+	// 	return
+	// }
+	// pm.assigned[pieceIndex] = peer
 }
-
-// func (pm *PieceManager) reassign(peer *Peer, piece *Piece) {
-// pm.assignPiece(peer)
-// pm.unassignedPieces <- piece
-// delete(pm.assigned, piece.index)
-// peer.assignedPiece = nil
-// }
 
 type FileEntry struct {
 	ID          int
@@ -171,7 +178,7 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 
 	pm := &PieceManager{
 		unassignedPieces: make(chan int),
-		assigned:         make(map[int]*Peer),
+		assigned:         make(map[int]int),
 		writer:           writer,
 		results:          results,
 	}
@@ -198,8 +205,8 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 					logger.Error("[FAIL DOWNLOAD]", "piece", result.Index, "error", result.Err)
 				} else {
 					logger.Debug("[DOWNLOADED]", "piece", result.Index)
-					peer := pm.assigned[result.Index]
-					pm.assignPiece(peer)
+					// peer := pm.assigned[result.Index]
+					// pm.assignPiece(peer)
 				}
 			}
 		}
@@ -213,7 +220,7 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 		}
 	}()
 
-	// pprint peers
+	// print peers
 	// peerTicker := time.NewTicker(10 * time.Second)
 	// go func() {
 	// 	for range peerTicker.C {
@@ -266,7 +273,6 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 				peer.writer = writer.worker
 				peer.ID = pm.peerAutoIncrement
 				peer.log = logger
-
 				pm.peerAutoIncrement++
 				pm.assignPiece(peer)
 
