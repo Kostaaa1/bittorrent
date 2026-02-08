@@ -8,60 +8,76 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
+	"test/internal/torrent/io"
+	"test/internal/torrent/peer"
 	"test/internal/torrent/tracker"
 	"test/pkg/bencode"
 	"time"
 )
 
-type Result struct {
-	Index int
-	Begin int
-	Err   error
-}
-
 type PieceManager struct {
-	failedPieces      chan int
-	assigned          map[int]int // TODO: piece ID -> peer ID instead
-	numBlocksPerPiece int8
-	writer            *PieceWriter
-	results           chan Result
-	peerAutoIncrement int
-	peer              []*Peer
+	bitfield   peer.Bitfield
+	mu         sync.Mutex
+	assigned   map[int]uint64
+	unassigned map[int]uint64
+	peers      []*peer.Peer
 }
 
-// Problem: Peers needs to assign pieces for themselves, so when peer assign the piece, it should notify the manager that that piece is being reserved by peer
-
-// Solution 1:
-// We need to ditch the logic of piece manager to assign pieces to peers on successfully downloaded pieces. Only assign to peers when the download fails.
-
-// before peer assigns the next piece that it has, check if its reserved or downloaded previously by other peer. Iterate until it finds the next available piece?
-
-// notify piece manager (via channel) every time peer assigns new piece to itself, use map[pieceIndex]peerIndex for assigned pieces in piece manager.
-
-// when download of piece fails for some reason, then:
-// MARK PIECE MISSING - delete (or mark that failed) in map - means that piece is missing
-// find the peer that has the piece
-// send piece index to peer individual queue
-
-// MUST NOT FAIL, ALWAYS NEEDS TO ASSIGN SOME PIECE
-func (pm *PieceManager) assignPiece(peer *Peer) {
-	// pieceIndex := <-pm.unassignedPieces
-	// ok := peer.AssignPiece(pieceIndex)
-	// if !ok {
-	// 	pm.unassignedPieces <- pieceIndex
-	// 	pm.assignPiece(peer)
-	// 	return
-	// }
-	// pm.assigned[pieceIndex] = peer
+func NewPieceManager(pieces [][20]byte) *PieceManager {
+	// TODO: do this via channel in separate goroutine...
+	unassigned := make(map[int]uint64, len(pieces))
+	for index := range pieces {
+		unassigned[index] = 0
+	}
+	fmt.Println("LENGTH OF UNASSIGNED", len(unassigned))
+	return &PieceManager{
+		assigned:   make(map[int]uint64),
+		unassigned: unassigned,
+		peers:      make([]*peer.Peer, 0),
+	}
 }
 
-type FileEntry struct {
-	ID          int
-	file        *os.File
-	FullPath    string
-	Length      int
-	StartOffset int
-	EndOffset   int
+func (pm *PieceManager) addPeer(peer *peer.Peer) {
+	pm.mu.Lock()
+	pm.peers = append(pm.peers, peer)
+	pm.mu.Unlock()
+}
+
+func (pm *PieceManager) getAssignedPeer(pieceIndex int) *peer.Peer {
+	pm.mu.Lock()
+	peerID, found := pm.assigned[pieceIndex]
+	fmt.Println("PIECE ASSIGNED TO PEER", pieceIndex, peerID)
+	pm.mu.Unlock()
+
+	if !found {
+		return nil
+	}
+
+	return pm.peers[peerID]
+}
+
+func (pm *PieceManager) reassign(pieceIndex int) {
+	pm.mu.Lock()
+	delete(pm.assigned, pieceIndex)
+	pm.unassigned[pieceIndex] = 0
+	pm.mu.Unlock()
+}
+
+func (pm *PieceManager) fillPeerQueue(peer *peer.Peer) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	for peer.CanAssign() {
+		for pieceID := range pm.unassigned {
+			if peer.HasPiece(pieceID) {
+				delete(pm.unassigned, pieceID)
+				pm.assigned[pieceID] = peer.ID
+				peer.AddPieceToQueue(pieceID)
+				break
+			}
+		}
+	}
 }
 
 type TorrentFile struct {
@@ -69,7 +85,7 @@ type TorrentFile struct {
 	PieceLength int
 	Announce    string
 	UrlList     []string
-	Files       []*FileEntry
+	Files       []*io.FileEntry
 	Name        string
 	Pieces      [][20]byte
 	InfoHash    [20]byte
@@ -148,7 +164,7 @@ func newLogger() *slog.Logger {
 func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 	peerCh := make(chan tracker.PeerAddress)
 
-	hs := &Handshake{
+	hs := peer.Handshake{
 		Pstr:      []byte("BitTorrent protocol"),
 		Reserverd: [8]byte{},
 		InfoHash:  tf.InfoHash,
@@ -158,55 +174,41 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 	blockSize := int(math.Pow(2, 14))
 	numBlocksPerPiece := int8(tf.PieceLength / blockSize)
 
-	results := make(chan Result)
-
-	writer := &PieceWriter{
-		worker:            make(chan PieceMessage),
-		pieces:            make(map[int]*PieceBuffer),
-		files:             tf.Files,
-		results:           results,
-		pieceLength:       tf.PieceLength,
-		numBlocksPerPiece: numBlocksPerPiece,
-		numOfPieces:       len(tf.Pieces),
-		totalLength:       tf.TotalLength,
-		hashPieces:        tf.Pieces,
-	}
-
+	writer := io.NewPieceWriter(
+		tf.PieceLength,
+		tf.Pieces,
+		tf.Files,
+		tf.TotalLength,
+		numBlocksPerPiece,
+	)
+	writerC, resultC := writer.Channles()
 	go writer.Start()
 
-	var wg sync.WaitGroup
-
-	pm := &PieceManager{
-		unassignedPieces: make(chan int),
-		assigned:         make(map[int]int),
-		writer:           writer,
-		results:          results,
-	}
-
+	pm := NewPieceManager(tf.Pieces)
 	logger := newLogger()
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for index := range tf.Pieces {
-			pm.unassignedPieces <- index
-		}
-		fmt.Println("exit from unassigned pieces")
-	}()
+	var wg sync.WaitGroup
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for {
-			for result := range pm.results {
+			for result := range resultC {
 				if result.Err != nil {
-					// piece write failed
-					// unassign/reassign?
 					logger.Error("[FAIL DOWNLOAD]", "piece", result.Index, "error", result.Err)
+					pm.reassign(result.Index)
 				} else {
 					logger.Debug("[DOWNLOADED]", "piece", result.Index)
-					// peer := pm.assigned[result.Index]
-					// pm.assignPiece(peer)
+
+					peer := pm.getAssignedPeer(result.Index)
+					if peer == nil {
+						fmt.Println("LENGTH OF PEERS:", len(pm.peers), len(pm.assigned), len(pm.unassigned), result.Index)
+						for assignedID, assignedPeer := range pm.assigned {
+							fmt.Println("Assigned", assignedID, assignedPeer)
+						}
+						panic("peer is nil")
+					}
+					pm.fillPeerQueue(peer)
 				}
 			}
 		}
@@ -220,19 +222,9 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 		}
 	}()
 
-	// print peers
-	// peerTicker := time.NewTicker(10 * time.Second)
-	// go func() {
-	// 	for range peerTicker.C {
-	// 		fmt.Println("Connected to peers:")
-	// 		for _, p := range pm.peer {
-	// 			fmt.Println("Peer:", p.conn.RemoteAddr())
-	// 		}
-	// 	}
-	// }()
+	var peerCounter uint64 = 0
 
 	wg.Add(1)
-
 	go func() {
 		defer wg.Done()
 
@@ -249,34 +241,21 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 					return
 				}
 
-				peer := &Peer{conn: conn}
+				id := atomic.AddUint64(&peerCounter, 1) - 1
 
-				if err := peer.initiateHandshake(hs); err != nil {
-					logger.Error("[HANDSHAKE]", "status", "failed", "error", err)
-					conn.Close()
-					return
-				}
+				peer := peer.New(id, conn, writerC, logger)
+				peer.SetInfo(
+					len(tf.Pieces),
+					tf.TotalLength,
+					tf.PieceLength,
+					blockSize,
+					numBlocksPerPiece,
+				)
 
-				logger.Info("[HANDSHAKE]", "status", "success", "peer", addr)
+				pm.fillPeerQueue(peer)
+				pm.addPeer(peer)
 
-				// debugg
-				pm.peer = append(pm.peer, peer)
-
-				peer.amInterested = false
-				peer.peerChoking = true
-				peer.totalLength = tf.TotalLength
-				peer.blockSize = blockSize
-				peer.numBlocksPerPiece = numBlocksPerPiece
-				peer.pieceLength = tf.PieceLength
-				peer.numOfPieces = len(tf.Pieces)
-				peer.pipeline = NewPipeline(5)
-				peer.writer = writer.worker
-				peer.ID = pm.peerAutoIncrement
-				peer.log = logger
-				pm.peerAutoIncrement++
-				pm.assignPiece(peer)
-
-				if err := peer.ReadMessages(); err != nil {
+				if err := peer.Open(hs); err != nil {
 					logger.Error("[PEER]", "error: failed to read message", err)
 					return
 				}

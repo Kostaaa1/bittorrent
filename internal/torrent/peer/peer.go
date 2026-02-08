@@ -1,10 +1,11 @@
-package torrent
+package peer
 
 import (
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -20,37 +21,28 @@ func (b Bitfield) SetPiece(index int) bool {
 	return false
 }
 
-type pipeline struct {
-	windowSize int
-	inflight   int
-	nextBlock  int
-}
-
-func NewPipeline(windowSize int) *pipeline {
-	return &pipeline{windowSize: windowSize}
-}
-
-func (p *pipeline) canRequest() bool {
-	return p.inflight < p.windowSize
+func (peer *Peer) canRequest() bool {
+	return peer.amInterested && !peer.peerChoking
 }
 
 func (peer *Peer) dispatchRequests() {
 	if !peer.canRequest() {
 		return
 	}
-	if !peer.pipeline.canRequest() {
-		return
+
+	if peer.pieceQueue.curr == nil {
+		peer.assignNext()
 	}
 
-	for peer.pipeline.inflight < peer.pipeline.windowSize {
-		index := *peer.assignedPiece
-		begin := peer.pipeline.nextBlock * peer.blockSize
-		blockLen := peer.blockSize
+	for peer.inflight < peer.windowSize {
+		index := *peer.pieceQueue.curr
+		begin := peer.nextBlock * peer.info.blockSize
+		blockLen := peer.info.blockSize
 
-		lastPieceID := peer.numOfPieces - 1
+		lastPieceID := peer.info.numOfPieces - 1
 
 		if index == lastPieceID {
-			remaining := peer.totalLength - (lastPieceID * peer.pieceLength) - begin
+			remaining := peer.info.totalLength - (lastPieceID * peer.info.pieceLength) - begin
 			if remaining < blockLen {
 				blockLen = remaining
 			}
@@ -58,15 +50,28 @@ func (peer *Peer) dispatchRequests() {
 
 		peer.sendRequest(index, begin, blockLen)
 
-		peer.pipeline.inflight++
-		peer.pipeline.nextBlock++
+		peer.inflight++
+		peer.nextBlock++
 
-		if peer.pipeline.nextBlock >= int(peer.numBlocksPerPiece) {
-			peer.pipeline.nextBlock = 0
+		if peer.nextBlock >= int(peer.info.numBlocksPerPiece) {
+			peer.nextBlock = 0
+			peer.assignNext()
+
 			// TODO: assign next available piece (THAT THIS PEER HAVE AND THAT'S NOT DOWNLOADED OR ASSIGNED by another peer) to the peer
-			peer.AssignPiece(index + 1)
+			// if index+1 < peer.info.numOfPieces {
+			// peer.assignPiece(index + 1)
+			// 	peer.assignNext()
+			// }
 		}
 	}
+}
+
+type torrentInfo struct {
+	numOfPieces       int
+	totalLength       int
+	pieceLength       int
+	blockSize         int
+	numBlocksPerPiece int8
 }
 
 // Peer edge cases
@@ -75,7 +80,7 @@ func (peer *Peer) dispatchRequests() {
 // 3. Slow peer - timeouts or reassigning pieces to faster peers, keep track of response time.
 // 4. Request pipeline - sliding window algorithm, the peer needs to request blocks from outside of assigned pieces. It needs an ability to assign pieces by itself, need to check for remaining window requests and request for the next available piece. this is problematic cause peer manager assi
 type Peer struct {
-	ID       int
+	ID       uint64
 	conn     net.Conn
 	bitfield Bitfield
 
@@ -84,32 +89,107 @@ type Peer struct {
 	peerChoking    bool
 	peerInterested bool
 
-	pipeline      *pipeline
-	writer        chan<- PieceMessage
-	assignedPiece *int
+	writer chan<- PieceMessage
 
 	keepAliveTickInterval time.Duration
 
-	numOfPieces       int
-	totalLength       int
-	pieceLength       int
-	blockSize         int
-	numBlocksPerPiece int8
+	info torrentInfo
+	log  *slog.Logger
 
-	log *slog.Logger
+	// Request Pipeline
+	windowSize int
+	inflight   int
+	nextBlock  int
+
+	pieceQueue *pieceQueue
 }
 
-// Closes and clears resources
-// connection, keep alive ticker
-func (peer *Peer) Close() {}
+type pieceQueue struct {
+	mu      sync.Mutex
+	maxSize int
+	queue   map[int]bool
+	curr    *int
+}
 
-func (peer *Peer) AssignPiece(pieceIndex int) bool {
-	if peer.bitfield != nil && !peer.bitfield.HasPiece(pieceIndex) {
-		return false
+func (pq *pieceQueue) canAssign() bool {
+	return len(pq.queue) < pq.maxSize
+}
+
+func (peer *Peer) CanAssign() bool {
+	return peer.pieceQueue.canAssign()
+}
+
+func New(
+	id uint64,
+	conn net.Conn,
+	writer chan<- PieceMessage,
+	log *slog.Logger,
+) *Peer {
+	queue := &pieceQueue{
+		maxSize: 5,
+		queue:   make(map[int]bool),
+		curr:    nil,
 	}
-	peer.log.Debug("[ASSIGN]", "piece", pieceIndex)
-	peer.assignedPiece = &pieceIndex
-	return true
+
+	return &Peer{
+		ID:           id,
+		conn:         conn,
+		amInterested: false,
+		peerChoking:  true,
+		writer:       writer,
+		log:          log,
+		windowSize:   5,
+		pieceQueue:   queue,
+	}
+}
+
+func (p *Peer) SetInfo(
+	numOfPieces int,
+	totalLength int,
+	pieceLength int,
+	blockSize int,
+	numBlocksPerPiece int8,
+) {
+	p.info = torrentInfo{
+		numOfPieces,
+		totalLength,
+		pieceLength,
+		blockSize,
+		numBlocksPerPiece,
+	}
+}
+
+func (p *Peer) HasPiece(pieceIndex int) bool {
+	if p.bitfield == nil {
+		return true
+	}
+	return p.bitfield.HasPiece(pieceIndex)
+}
+
+func (peer *Peer) assignNext() {
+	peer.pieceQueue.mu.Lock()
+	defer peer.pieceQueue.mu.Unlock()
+
+	c := peer.pieceQueue.curr
+	if c != nil {
+		delete(peer.pieceQueue.queue, *c)
+	}
+
+	for piece := range peer.pieceQueue.queue {
+		peer.pieceQueue.curr = &piece
+		break
+	}
+}
+
+func (peer *Peer) AddPieceToQueue(pieceID int) {
+	peer.pieceQueue.mu.Lock()
+	defer peer.pieceQueue.mu.Unlock()
+
+	peer.log.Debug("[ASSIGN]", "piece", pieceID, "peer", peer.conn.RemoteAddr())
+	if peer.pieceQueue.curr != nil {
+		delete(peer.pieceQueue.queue, *peer.pieceQueue.curr)
+	}
+	peer.pieceQueue.queue[pieceID] = true
 }
 
 func (p *Peer) writeMsg(msg Message) error {
@@ -149,29 +229,35 @@ func (p *Peer) sendHave() {
 }
 
 func (p *Peer) sendRequest(index, begin, block int) error {
-	p.log.Debug("[REQUEST]", "piece", index, "begin", begin, "block", block, "inflight", p.pipeline.inflight)
+	p.log.Debug("[REQUEST]", "piece", index, "begin", begin, "block", block)
 	payload := FormatRequest(index, begin, block)
 	return p.writeMsg(Message{ID: MsgRequest, Payload: payload})
 }
 
-func (p *Peer) canRequest() bool {
-	return p.assignedPiece != nil && p.amInterested && !p.peerChoking
+func (peer *Peer) Close() error {
+	return peer.conn.Close()
 }
 
-func (p *Peer) ReadMessages() error {
+func (p *Peer) Open(hs Handshake) error {
+	p.log = slog.With("peer", p.conn.RemoteAddr())
+
+	if err := p.initiateHandshake(hs); err != nil {
+		p.log.Error("[HANDSHAKE]", "status", "failed", "error", err)
+		return p.Close()
+	}
+
+	p.log.Info("[HANDSHAKE]", "status", "success", "peer", p.conn.RemoteAddr())
+
 	if p.keepAliveTickInterval == 0 {
 		p.keepAliveTickInterval = time.Minute
 	}
-
-	p.log = slog.With("peer", p.conn.RemoteAddr())
 
 	p.sendInterested()
 
 	ticker := time.NewTicker(p.keepAliveTickInterval)
 	defer ticker.Stop()
 	go func() {
-		for {
-			<-ticker.C
+		for range ticker.C {
 			p.sendKeepAlive()
 		}
 	}()
@@ -211,16 +297,16 @@ func (p *Peer) ReadMessages() error {
 			p.bitfield = msg.Payload
 		case MsgPiece:
 			piece := ParsePieceMessage(msg.Payload)
-			p.pipeline.inflight--
-			p.pipeline.inflight--
+
+			p.inflight--
 			p.dispatchRequests()
 			p.writer <- piece
 
 			p.log.Debug(
 				"[PIECE]",
-				"piece", piece.index,
-				"begin", piece.begin,
-				"len", len(piece.block),
+				"piece", piece.Index,
+				"begin", piece.Begin,
+				"len", len(piece.Block),
 				// "inflight", p.pipeline.inflight,
 			)
 
@@ -234,7 +320,7 @@ func (p *Peer) ReadMessages() error {
 	}
 }
 
-func (p *Peer) initiateHandshake(hs *Handshake) error {
+func (p *Peer) initiateHandshake(hs Handshake) error {
 	_, err := p.conn.Write(hs.Bytes())
 	if err != nil {
 		return fmt.Errorf("failed to write handshake: %v", err)

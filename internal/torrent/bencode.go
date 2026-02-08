@@ -4,6 +4,7 @@ import (
 	"crypto/sha1"
 	"errors"
 	"path/filepath"
+	"test/internal/torrent/io"
 	"test/pkg/bencode"
 )
 
@@ -104,13 +105,13 @@ func (info *bencodeInfo) readPieces() ([][20]byte, error) {
 	return pieces, nil
 }
 
-func (bto *bencodeTorrent) prepareFileEntries() []*FileEntry {
+func (bto *bencodeTorrent) prepareFileEntries() []*io.FileEntry {
 	if len(bto.Info.Files) == 0 {
-		files := make([]*FileEntry, 1)
+		files := make([]*io.FileEntry, 1)
 
 		l := *bto.Info.Length
 
-		files[0] = &FileEntry{
+		files[0] = &io.FileEntry{
 			ID:          0,
 			FullPath:    bto.Info.Name,
 			Length:      l,
@@ -121,7 +122,7 @@ func (bto *bencodeTorrent) prepareFileEntries() []*FileEntry {
 		return files
 	}
 
-	files := make([]*FileEntry, len(bto.Info.Files))
+	files := make([]*io.FileEntry, len(bto.Info.Files))
 	var start, end int
 
 	for i, file := range bto.Info.Files {
@@ -130,7 +131,7 @@ func (bto *bencodeTorrent) prepareFileEntries() []*FileEntry {
 		name := append([]string{bto.Info.Name}, file.Path...)
 		fullPath := filepath.Join(name...)
 
-		files[i] = &FileEntry{
+		files[i] = &io.FileEntry{
 			ID:          i,
 			Length:      file.Length,
 			FullPath:    fullPath,

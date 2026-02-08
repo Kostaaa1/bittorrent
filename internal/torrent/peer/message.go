@@ -1,9 +1,7 @@
-package torrent
+package peer
 
 import (
 	"encoding/binary"
-	"errors"
-	"fmt"
 	"io"
 )
 
@@ -48,8 +46,7 @@ func ReadMessage(r io.Reader) (*Message, error) {
 	}
 
 	if length == 0 {
-		fmt.Println("[ERROR] LENGTH 0")
-		return nil, errors.New("length is zero")
+		return &Message{}, nil
 	}
 
 	var b [1]byte
@@ -60,6 +57,7 @@ func ReadMessage(r io.Reader) (*Message, error) {
 	id := b[0]
 
 	payload := make([]byte, length-1)
+
 	_, err = io.ReadFull(r, payload)
 	if err != nil {
 		return nil, err
@@ -80,9 +78,9 @@ func FormatRequest(index int, begin int, length int) []byte {
 }
 
 type PieceMessage struct {
-	index int
-	begin int
-	block []byte
+	Index int
+	Begin int
+	Block []byte
 }
 
 func ParsePieceMessage(payload []byte) PieceMessage {
@@ -91,8 +89,8 @@ func ParsePieceMessage(payload []byte) PieceMessage {
 	block := make([]byte, len(payload[8:]))
 	copy(block, payload[8:])
 	return PieceMessage{
-		index: int(index),
-		begin: int(begin),
-		block: block,
+		Index: int(index),
+		Begin: int(begin),
+		Block: block,
 	}
 }

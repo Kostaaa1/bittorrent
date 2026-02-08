@@ -1,4 +1,4 @@
-package torrent
+package io
 
 import (
 	"crypto/sha1"
@@ -6,7 +6,17 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"test/internal/torrent/peer"
 )
+
+type FileEntry struct {
+	ID          int
+	file        *os.File
+	FullPath    string
+	Length      int
+	StartOffset int
+	EndOffset   int
+}
 
 type PieceBuffer struct {
 	index      int
@@ -16,22 +26,56 @@ type PieceBuffer struct {
 	blockCount int8
 }
 
-//	func (p *PieceBuffer) write(begin int, block []byte) {
-//		copy(p.buffer[begin:], block)
-//		p.blockCount++
-//	}
-func (p *PieceBuffer) verify() bool { return sha1.Sum(p.buffer) == p.hash }
+type Result struct {
+	Index int
+	Begin int
+	Err   error
+}
+
+func (pb *PieceBuffer) verify() bool {
+	return sha1.Sum(pb.buffer) == pb.hash
+}
+
+func (pb *PieceBuffer) writeBlock(begin int, block []byte) {
+	copy(pb.buffer[begin:], block)
+	pb.blockCount++
+}
 
 type PieceWriter struct {
 	numBlocksPerPiece int8
 	numOfPieces       int
 	totalLength       int
 	pieceLength       int
-	hashPieces        [][20]byte
-	worker            chan PieceMessage
-	pieces            map[int]*PieceBuffer
-	files             []*FileEntry
-	results           chan<- Result
+
+	hashPieces [][20]byte
+	pieces     map[int]*PieceBuffer
+	worker     chan peer.PieceMessage
+	files      []*FileEntry
+	results    chan Result
+}
+
+func NewPieceWriter(
+	pieceLength int,
+	pieces [][20]byte,
+	entries []*FileEntry,
+	totalLength int,
+	numBlocksPerPiece int8,
+) *PieceWriter {
+	return &PieceWriter{
+		worker:            make(chan peer.PieceMessage),
+		results:           make(chan Result),
+		pieces:            make(map[int]*PieceBuffer),
+		files:             entries,
+		hashPieces:        pieces,
+		pieceLength:       pieceLength,
+		numBlocksPerPiece: numBlocksPerPiece,
+		numOfPieces:       len(pieces),
+		totalLength:       totalLength,
+	}
+}
+
+func (pw *PieceWriter) Channles() (chan peer.PieceMessage, <-chan Result) {
+	return pw.worker, pw.results
 }
 
 func (pw *PieceWriter) getPieceSize(pieceIndex int) int {
@@ -43,26 +87,24 @@ func (pw *PieceWriter) getPieceSize(pieceIndex int) int {
 	return size
 }
 
-func (pw *PieceWriter) writeBlock(msg PieceMessage) *PieceBuffer {
-	piece := pw.pieces[msg.index]
+func (pw *PieceWriter) writeBlock(msg peer.PieceMessage) *PieceBuffer {
+	pbuf := pw.pieces[msg.Index]
 
-	if piece == nil {
-		size := pw.getPieceSize(msg.index)
-		piece = &PieceBuffer{
-			index:      msg.index,
+	if pbuf == nil {
+		size := pw.getPieceSize(msg.Index)
+		pbuf = &PieceBuffer{
+			index:      msg.Index,
 			blockCount: 0,
 			size:       size,
 			buffer:     make([]byte, size),
-			hash:       pw.hashPieces[msg.index],
+			hash:       pw.hashPieces[msg.Index],
 		}
 	}
 
-	copy(piece.buffer[msg.begin:], msg.block)
-	piece.blockCount++
+	pbuf.writeBlock(msg.Begin, msg.Block)
+	pw.pieces[msg.Index] = pbuf
 
-	pw.pieces[msg.index] = piece
-
-	return piece
+	return pbuf
 }
 
 func (pw *PieceWriter) Start() error {
@@ -71,14 +113,14 @@ func (pw *PieceWriter) Start() error {
 
 		if piece.blockCount == pw.numBlocksPerPiece {
 			result := Result{
-				Index: msg.index,
-				Begin: msg.begin,
+				Index: msg.Index,
+				Begin: msg.Begin,
 			}
 
 			if !piece.verify() {
-				result.Err = fmt.Errorf("hashes do not match for piece %d", msg.index)
+				result.Err = fmt.Errorf("hashes do not match for piece %d", msg.Index)
 				pw.results <- result
-			} else if _, err := pw.WritePiece(msg.index, piece.buffer); err != nil {
+			} else if _, err := pw.WritePiece(msg.Index, piece.buffer); err != nil {
 				result.Err = err
 			}
 
@@ -134,8 +176,6 @@ func (w *PieceWriter) WritePiece(pieceIndex int, piece []byte) (int, error) {
 			log.Fatal("failed to writeAt", entry.FullPath, err)
 		}
 
-		// TODO: This still has bugs
-		// Write as long as remainder buffer can be written to file
 		for remainderLen > 0 {
 			fileID++
 			entry = w.files[fileID]

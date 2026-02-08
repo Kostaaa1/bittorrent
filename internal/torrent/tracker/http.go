@@ -139,7 +139,7 @@ func parsePeersBinary(peers []byte) ([]PeerAddress, error) {
 
 	for i := range parsed {
 		b := [6]byte{}
-		copy(b[:], peers[i:i+6])
+		copy(b[:], peers[i*6:i*6+6])
 
 		parsed[i] = PeerAddress{
 			IP:   fmt.Sprintf("%d.%d.%d.%d", b[0], b[1], b[2], b[3]),
