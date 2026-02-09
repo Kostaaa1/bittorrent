@@ -3,6 +3,7 @@ package torrent
 import (
 	"encoding/hex"
 	"fmt"
+	"log"
 	"log/slog"
 	"math"
 	"net"
@@ -30,7 +31,6 @@ func NewPieceManager(pieces [][20]byte) *PieceManager {
 	for index := range pieces {
 		unassigned[index] = 0
 	}
-	fmt.Println("LENGTH OF UNASSIGNED", len(unassigned))
 	return &PieceManager{
 		assigned:   make(map[int]uint64),
 		unassigned: unassigned,
@@ -57,7 +57,7 @@ func (pm *PieceManager) getAssignedPeer(pieceIndex int) *peer.Peer {
 	return pm.peers[peerID]
 }
 
-func (pm *PieceManager) reassign(pieceIndex int) {
+func (pm *PieceManager) unassign(pieceIndex int) {
 	pm.mu.Lock()
 	delete(pm.assigned, pieceIndex)
 	pm.unassigned[pieceIndex] = 0
@@ -197,14 +197,35 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		ticker := time.NewTicker(time.Second * 30)
+		for range ticker.C {
+			for _, p := range pm.peers {
+				p.Print()
+			}
+		}
+	}()
+
+	f, err := os.OpenFile("log.txt", os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+	writerLog := log.New(f, "", log.Ldate|log.Ltime)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
 		for {
 			for result := range resultC {
 				if result.Err != nil {
 					logger.Error("[FAIL DOWNLOAD]", "piece", result.Index, "error", result.Err)
-					pm.reassign(result.Index)
+					pm.unassign(result.Index)
 				} else {
 					peer := pm.getAssignedPeer(result.Index)
 					logger.Debug("[DOWNLOADED]", "piece", result.Index, "peer_addr", peer.Addr, "peer_id", peer.ID, "num_of_peers", len(pm.peers), "left_unassigned", len(pm.unassigned))
+
+					writerLog.Println("[DOWNLOADED]", "piece", result.Index, "peer_addr", peer.Addr, "num_of_peers", len(pm.peers), "offset", result.Begin, "block_size", result.LenBlock, "actual_write_size", result.Written)
+
 					pm.fillPeerQueue(peer)
 				}
 			}
@@ -252,9 +273,14 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 				peer.OnUnchoke = func() {
 					pm.fillPeerQueue(peer)
 				}
+				peer.OnChoke = func(pieces []int) {
+					for _, piece := range pieces {
+						pm.unassign(piece)
+					}
+				}
 
 				if err := peer.Open(hs); err != nil {
-					logger.Error("[PEER]", "error: failed to read message", err)
+					logger.Error("[PEER DISCONNECT]", "error: failed to read message", err)
 					return
 				}
 			}()

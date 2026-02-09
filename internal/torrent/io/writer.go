@@ -27,9 +27,11 @@ type PieceBuffer struct {
 }
 
 type Result struct {
-	Index int
-	Begin int
-	Err   error
+	Index    int
+	Begin    int
+	LenBlock int
+	Written  int
+	Err      error
 }
 
 func (pb *PieceBuffer) verify() bool {
@@ -113,16 +115,21 @@ func (pw *PieceWriter) Start() error {
 
 		if piece.blockCount == pw.numBlocksPerPiece {
 			result := Result{
-				Index: msg.Index,
-				Begin: msg.Begin,
+				Index:    msg.Index,
+				Begin:    msg.Begin,
+				LenBlock: len(msg.Block),
 			}
 
 			if !piece.verify() {
 				result.Err = fmt.Errorf("hashes do not match for piece %d", msg.Index)
 				pw.results <- result
-			} else if _, err := pw.WritePiece(msg.Index, piece.buffer); err != nil {
+			}
+
+			n, err := pw.WritePiece(msg.Index, piece.buffer)
+			if err != nil {
 				result.Err = err
 			}
+			result.Written = n
 
 			pw.results <- result
 		}
@@ -159,7 +166,7 @@ func (w *PieceWriter) openFile(fullPath string) (*os.File, error) {
 		return nil, err
 	}
 
-	return os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY, 0644)
+	return os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 }
 
 func (w *PieceWriter) WritePiece(pieceIndex int, piece []byte) (int, error) {
