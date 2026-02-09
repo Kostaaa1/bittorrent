@@ -23,7 +23,7 @@ type PieceBuffer struct {
 	size       int
 	hash       [20]byte
 	buffer     []byte
-	blockCount int8
+	blockCount int
 }
 
 type Result struct {
@@ -42,7 +42,7 @@ func (pb *PieceBuffer) writeBlock(begin int, block []byte) {
 }
 
 type PieceWriter struct {
-	numBlocksPerPiece int8
+	numBlocksPerPiece int
 	numOfPieces       int
 	totalLength       int
 	pieceLength       int
@@ -58,8 +58,8 @@ func NewPieceWriter(
 	pieceLength int,
 	pieces [][20]byte,
 	entries []*FileEntry,
-	totalLength int,
-	numBlocksPerPiece int8,
+	totalLength,
+	numBlocksPerPiece int,
 ) *PieceWriter {
 	return &PieceWriter{
 		worker:            make(chan peer.PieceMessage),
@@ -144,6 +144,24 @@ func (w *PieceWriter) getFileEntry(pieceIndex int) (entry *FileEntry, id int, er
 	return
 }
 
+func (w *PieceWriter) openFile(fullPath string) (*os.File, error) {
+	dir := filepath.Dir(fullPath)
+
+	info, err := os.Stat(dir)
+	if err == nil && !info.IsDir() {
+		return nil, fmt.Errorf("%s exists but is not a directory", dir)
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, err
+	}
+
+	return os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY, 0644)
+}
+
 func (w *PieceWriter) WritePiece(pieceIndex int, piece []byte) (int, error) {
 	entry, fileID, err := w.getFileEntry(pieceIndex)
 	if err != nil {
@@ -151,10 +169,7 @@ func (w *PieceWriter) WritePiece(pieceIndex int, piece []byte) (int, error) {
 	}
 
 	if entry.file == nil {
-		if err := os.MkdirAll(filepath.Dir(entry.FullPath), 0755); err != nil {
-			return 0, fmt.Errorf("Failed to os.Mkdirall: %v", err)
-		}
-		f, err := os.OpenFile(entry.FullPath, os.O_CREATE|os.O_WRONLY, 0644)
+		f, err := w.openFile(entry.FullPath)
 		if err != nil {
 			return 0, err
 		}
@@ -180,9 +195,9 @@ func (w *PieceWriter) WritePiece(pieceIndex int, piece []byte) (int, error) {
 			fileID++
 			entry = w.files[fileID]
 
-			f, err := os.OpenFile(entry.FullPath, os.O_CREATE|os.O_WRONLY, 0644)
+			f, err := w.openFile(entry.FullPath)
 			if err != nil {
-				log.Fatal("failed to openFile", entry.FullPath, err)
+				log.Fatal(err)
 			}
 			entry.file = f
 

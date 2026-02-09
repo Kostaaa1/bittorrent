@@ -5,7 +5,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"sync"
 	"time"
 )
 
@@ -21,17 +20,17 @@ func (b Bitfield) SetPiece(index int) bool {
 	return false
 }
 
-func (peer *Peer) canRequest() bool {
+func (peer *Peer) CanRequest() bool {
 	return peer.amInterested && !peer.peerChoking
 }
 
 func (peer *Peer) dispatchRequests() {
-	if !peer.canRequest() {
+	if !peer.CanRequest() {
 		return
 	}
 
 	if peer.pieceQueue.curr == nil {
-		peer.assignNext()
+		peer.pieceQueue.assignNext()
 	}
 
 	for peer.inflight < peer.windowSize {
@@ -55,13 +54,7 @@ func (peer *Peer) dispatchRequests() {
 
 		if peer.nextBlock >= int(peer.info.numBlocksPerPiece) {
 			peer.nextBlock = 0
-			peer.assignNext()
-
-			// TODO: assign next available piece (THAT THIS PEER HAVE AND THAT'S NOT DOWNLOADED OR ASSIGNED by another peer) to the peer
-			// if index+1 < peer.info.numOfPieces {
-			// peer.assignPiece(index + 1)
-			// 	peer.assignNext()
-			// }
+			peer.pieceQueue.assignNext()
 		}
 	}
 }
@@ -71,7 +64,7 @@ type torrentInfo struct {
 	totalLength       int
 	pieceLength       int
 	blockSize         int
-	numBlocksPerPiece int8
+	numBlocksPerPiece int
 }
 
 // Peer edge cases
@@ -81,6 +74,7 @@ type torrentInfo struct {
 // 4. Request pipeline - sliding window algorithm, the peer needs to request blocks from outside of assigned pieces. It needs an ability to assign pieces by itself, need to check for remaining window requests and request for the next available piece. this is problematic cause peer manager assi
 type Peer struct {
 	ID       uint64
+	Addr     string
 	conn     net.Conn
 	bitfield Bitfield
 
@@ -102,17 +96,38 @@ type Peer struct {
 	nextBlock  int
 
 	pieceQueue *pieceQueue
+
+	OnUnchoke func()
+}
+
+// REFACTOR
+type pipeline struct {
+	windowSize int
+	inflight   int
+	nextBlock  int
+
+	pendingPieces   chan int
+	maxPendingLimit int
+	minPendingLimit int
+	curr            *int
 }
 
 type pieceQueue struct {
-	mu      sync.Mutex
+	queue   chan int
 	maxSize int
-	queue   map[int]bool
 	curr    *int
 }
 
 func (pq *pieceQueue) canAssign() bool {
 	return len(pq.queue) < pq.maxSize
+}
+
+func (pq *pieceQueue) assignNext() {
+	piece, ok := <-pq.queue
+	if !ok {
+		panic("queue is empty")
+	}
+	pq.curr = &piece
 }
 
 func (peer *Peer) CanAssign() bool {
@@ -125,20 +140,23 @@ func New(
 	writer chan<- PieceMessage,
 	log *slog.Logger,
 ) *Peer {
+	windowSize := 16
+	maxReqCount := 10
+
 	queue := &pieceQueue{
-		maxSize: 5,
-		queue:   make(map[int]bool),
+		maxSize: maxReqCount,
+		queue:   make(chan int, maxReqCount),
 		curr:    nil,
 	}
-
 	return &Peer{
 		ID:           id,
+		Addr:         conn.RemoteAddr().String(),
 		conn:         conn,
 		amInterested: false,
 		peerChoking:  true,
 		writer:       writer,
 		log:          log,
-		windowSize:   5,
+		windowSize:   windowSize,
 		pieceQueue:   queue,
 	}
 }
@@ -148,7 +166,7 @@ func (p *Peer) SetInfo(
 	totalLength int,
 	pieceLength int,
 	blockSize int,
-	numBlocksPerPiece int8,
+	numBlocksPerPiece int,
 ) {
 	p.info = torrentInfo{
 		numOfPieces,
@@ -166,30 +184,11 @@ func (p *Peer) HasPiece(pieceIndex int) bool {
 	return p.bitfield.HasPiece(pieceIndex)
 }
 
-func (peer *Peer) assignNext() {
-	peer.pieceQueue.mu.Lock()
-	defer peer.pieceQueue.mu.Unlock()
-
-	c := peer.pieceQueue.curr
-	if c != nil {
-		delete(peer.pieceQueue.queue, *c)
-	}
-
-	for piece := range peer.pieceQueue.queue {
-		peer.pieceQueue.curr = &piece
-		break
-	}
-}
-
 func (peer *Peer) AddPieceToQueue(pieceID int) {
-	peer.pieceQueue.mu.Lock()
-	defer peer.pieceQueue.mu.Unlock()
-
 	peer.log.Debug("[ASSIGN]", "piece", pieceID, "peer", peer.conn.RemoteAddr())
-	if peer.pieceQueue.curr != nil {
-		delete(peer.pieceQueue.queue, *peer.pieceQueue.curr)
+	if peer.pieceQueue.canAssign() {
+		peer.pieceQueue.queue <- pieceID
 	}
-	peer.pieceQueue.queue[pieceID] = true
 }
 
 func (p *Peer) writeMsg(msg Message) error {
@@ -282,6 +281,9 @@ func (p *Peer) Open(hs Handshake) error {
 		case MsgUnchoke:
 			p.log.Debug("[UNCHOKE]")
 			p.peerChoking = false
+			if p.OnUnchoke != nil {
+				p.OnUnchoke()
+			}
 			p.dispatchRequests()
 		case MsgInterested:
 			p.log.Debug("[INTERESTED]")

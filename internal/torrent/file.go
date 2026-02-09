@@ -69,13 +69,18 @@ func (pm *PieceManager) fillPeerQueue(peer *peer.Peer) {
 	defer pm.mu.Unlock()
 
 	for peer.CanAssign() {
+		assigned := false
 		for pieceID := range pm.unassigned {
 			if peer.HasPiece(pieceID) {
 				delete(pm.unassigned, pieceID)
 				pm.assigned[pieceID] = peer.ID
 				peer.AddPieceToQueue(pieceID)
+				assigned = true
 				break
 			}
+		}
+		if !assigned {
+			break
 		}
 	}
 }
@@ -172,7 +177,7 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 	}
 
 	blockSize := int(math.Pow(2, 14))
-	numBlocksPerPiece := int8(tf.PieceLength / blockSize)
+	numBlocksPerPiece := tf.PieceLength / blockSize
 
 	writer := io.NewPieceWriter(
 		tf.PieceLength,
@@ -198,16 +203,8 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 					logger.Error("[FAIL DOWNLOAD]", "piece", result.Index, "error", result.Err)
 					pm.reassign(result.Index)
 				} else {
-					logger.Debug("[DOWNLOADED]", "piece", result.Index)
-
 					peer := pm.getAssignedPeer(result.Index)
-					if peer == nil {
-						fmt.Println("LENGTH OF PEERS:", len(pm.peers), len(pm.assigned), len(pm.unassigned), result.Index)
-						for assignedID, assignedPeer := range pm.assigned {
-							fmt.Println("Assigned", assignedID, assignedPeer)
-						}
-						panic("peer is nil")
-					}
+					logger.Debug("[DOWNLOADED]", "piece", result.Index, "peer_addr", peer.Addr, "peer_id", peer.ID, "num_of_peers", len(pm.peers), "left_unassigned", len(pm.unassigned))
 					pm.fillPeerQueue(peer)
 				}
 			}
@@ -251,9 +248,10 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 					blockSize,
 					numBlocksPerPiece,
 				)
-
-				pm.fillPeerQueue(peer)
 				pm.addPeer(peer)
+				peer.OnUnchoke = func() {
+					pm.fillPeerQueue(peer)
+				}
 
 				if err := peer.Open(hs); err != nil {
 					logger.Error("[PEER]", "error: failed to read message", err)
