@@ -249,18 +249,23 @@ func (p *Peer) Open(hs Handshake) error {
 		switch msg.ID {
 		case MsgChoke:
 			p.log.Debug("[CHOKE]")
-			p.peerChoking = true
 
-			if p.pipeline != nil {
-				p.pipeline.mu.Lock()
-				left := make([]int, 0)
-				for piece := range p.pipeline.pieces {
-					left = append(left, piece)
-				}
-				p.pipeline.mu.Unlock()
-				p.pipeline = nil
-				p.OnChoke(left)
+			p.peerChoking = true
+			if toReassign := p.pipeline.destroy(); len(toReassign) > 0 {
+				p.OnChoke(toReassign)
 			}
+
+			// if p.pipeline != nil {
+			// 	p.pipeline.mu.Lock()
+			// 	left := make([]int, 0)
+			// 	for piece := range p.pipeline.pieces {
+			// 		left = append(left, piece)
+			// 	}
+			// 	p.pipeline.mu.Unlock()
+			// 	p.pipeline = nil
+			// 	p.OnChoke(left)
+			// }
+			// p.OnChoke(left)
 
 		case MsgUnchoke:
 			p.log.Debug("[UNCHOKE]")
