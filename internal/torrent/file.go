@@ -3,7 +3,6 @@ package torrent
 import (
 	"encoding/hex"
 	"fmt"
-	"log"
 	"log/slog"
 	"math"
 	"net"
@@ -12,80 +11,82 @@ import (
 	"sync/atomic"
 	"test/internal/torrent/io"
 	"test/internal/torrent/peer"
+	"test/internal/torrent/pieces"
 	"test/internal/torrent/tracker"
 	"test/pkg/bencode"
 	"time"
 )
 
-type PieceManager struct {
-	bitfield   peer.Bitfield
-	mu         sync.Mutex
-	assigned   map[int]uint64
-	unassigned map[int]uint64
-	peers      []*peer.Peer
-}
+// type PieceManager struct {
+// 	bitfield   peer.Bitfield
+// 	mu         sync.Mutex
+// 	assigned   map[int]uint64
+// 	unassigned map[int]uint64
+// 	peers      []*peer.Peer
+// }
 
-func NewPieceManager(pieces [][20]byte) *PieceManager {
-	// TODO: do this via channel in separate goroutine...
-	unassigned := make(map[int]uint64, len(pieces))
-	for index := range pieces {
-		unassigned[index] = 0
-	}
-	return &PieceManager{
-		assigned:   make(map[int]uint64),
-		unassigned: unassigned,
-		peers:      make([]*peer.Peer, 0),
-	}
-}
+// func NewPieceManager(pieces [][20]byte) *PieceManager {
+// 	// TODO: do this via channel in separate goroutine...
+// 	unassigned := make(map[int]uint64, len(pieces))
+// 	for index := range pieces {
+// 		unassigned[index] = 0
+// 	}
+// 	return &PieceManager{
+// 		bitfield:   make([]byte, (len(pieces)+7)/8),
+// 		assigned:   make(map[int]uint64),
+// 		unassigned: unassigned,
+// 		peers:      make([]*peer.Peer, 0),
+// 	}
+// }
 
-func (pm *PieceManager) addPeer(peer *peer.Peer) {
-	pm.mu.Lock()
-	pm.peers = append(pm.peers, peer)
-	pm.mu.Unlock()
-}
+// func (pm *PieceManager) addPeer(peer *peer.Peer) {
+// 	pm.mu.Lock()
+// 	pm.peers = append(pm.peers, peer)
+// 	pm.mu.Unlock()
+// }
 
-func (pm *PieceManager) getAssignedPeer(pieceIndex int) *peer.Peer {
-	pm.mu.Lock()
-	peerID, found := pm.assigned[pieceIndex]
-	fmt.Println("PIECE ASSIGNED TO PEER", pieceIndex, peerID)
-	pm.mu.Unlock()
+// func (pm *PieceManager) getAssignedPeer(pieceIndex int) *peer.Peer {
+// 	pm.mu.Lock()
+// 	peerID, found := pm.assigned[pieceIndex]
+// 	fmt.Println("PIECE ASSIGNED TO PEER", pieceIndex, peerID)
+// 	pm.mu.Unlock()
 
-	if !found {
-		return nil
-	}
+// 	if !found {
+// 		return nil
+// 	}
 
-	return pm.peers[peerID]
-}
+// 	return pm.peers[peerID]
+// }
 
-func (pm *PieceManager) unassign(pieceIndex int) {
-	pm.mu.Lock()
-	delete(pm.assigned, pieceIndex)
-	pm.unassigned[pieceIndex] = 0
-	pm.mu.Unlock()
-}
+// func (pm *PieceManager) unassign(pieceIndex int) {
+// 	pm.mu.Lock()
+// 	delete(pm.assigned, pieceIndex)
+// 	pm.unassigned[pieceIndex] = 0
+// 	pm.mu.Unlock()
+// }
 
-func (pm *PieceManager) fillPeerQueue(peer *peer.Peer) {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
+// func (pm *PieceManager) fillPeerQueue(peer *peer.Peer) {
+// 	pm.mu.Lock()
+// 	defer pm.mu.Unlock()
 
-	for peer.CanAssign() {
-		assigned := false
-		for pieceID := range pm.unassigned {
-			if peer.HasPiece(pieceID) {
-				delete(pm.unassigned, pieceID)
-				pm.assigned[pieceID] = peer.ID
+// 	for peer.CanAssign() {
+// 		assigned := false
+// 		for pieceID := range pm.unassigned {
+// 			if peer.HasPiece(pieceID) {
+// 				delete(pm.unassigned, pieceID)
+// 				pm.assigned[pieceID] = peer.ID
 
-				peer.AddPieceToQueue(pieceID)
+// 				peer.AddPieceToQueue(pieceID)
 
-				assigned = true
-				break
-			}
-		}
-		if !assigned {
-			break
-		}
-	}
-}
+// 				assigned = true
+// 				break
+// 			}
+// 		}
+// 		if !assigned {
+// 			break
+// 		}
+// 	}
+// }
 
 type TorrentFile struct {
 	TotalLength int
@@ -126,9 +127,6 @@ func (tf *TorrentFile) DiscoverPeers(
 	c chan<- tracker.PeerAddress,
 	req *tracker.AnnounceRequest,
 ) error {
-	// c <- tracker.PeerAddress{IP: "185.149.91.39", Port: 20046}
-	// return nil
-
 	if len(tf.AnnounceList) > 0 {
 		for _, list := range tf.AnnounceList {
 			for _, ann := range list {
@@ -194,18 +192,10 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 	writerC, resultC := writer.Channles()
 	go writer.Start()
 
-	pm := NewPieceManager(tf.Pieces)
+	pm := pieces.NewPieceManager(tf.Pieces)
 	logger := newLogger()
 
 	var wg sync.WaitGroup
-
-	f, err := os.OpenFile("log.txt", os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		panic(err)
-	}
-	defer f.Close()
-
-	writerLog := log.New(f, "", log.Ldate|log.Ltime)
 
 	wg.Add(1)
 	go func() {
@@ -214,14 +204,22 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 			for result := range resultC {
 				if result.Err != nil {
 					logger.Error("[FAIL DOWNLOAD]", "piece", result.Index, "error", result.Err)
-					pm.unassign(result.Index)
+					pm.FreePiece(result.Index)
 				} else {
-					peer := pm.getAssignedPeer(result.Index)
-					logger.Debug("[DOWNLOADED]", "piece", result.Index, "peer_addr", peer.Addr, "peer_id", peer.ID, "num_of_peers", len(pm.peers), "left_unassigned", len(pm.unassigned), "len_block", result.LenBlock)
+					pm.SetPiece(result.Index)
 
-					writerLog.Println("[DOWNLOADED]", "piece", result.Index, "peer_addr", peer.Addr, "num_of_peers", len(pm.peers), "offset", result.Begin, "block_size", result.LenBlock)
+					peer := pm.GetAssignedPeer(result.Index)
 
-					pm.fillPeerQueue(peer)
+					logger.Debug("[DOWNLOADED]",
+						"piece", result.Index,
+						"peer_addr", peer.Addr,
+						"peer_id", peer.ID,
+						// "num_of_peers", len(pm.peers),
+						// "left_unassigned", len(pm.unassigned),
+						"len_block", result.LenBlock,
+					)
+
+					pm.FillPeerQueue(peer)
 				}
 			}
 		}
@@ -239,6 +237,7 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 	var peerCounter uint64 = 0
 
 	wg.Add(1)
+
 	go func() {
 		defer wg.Done()
 
@@ -265,13 +264,16 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 					blockSize,
 					numBlocksPerPiece,
 				)
-				pm.addPeer(peer)
+
+				pm.AddPeer(peer)
+
 				peer.OnUnchoke = func() {
-					pm.fillPeerQueue(peer)
+					pm.FillPeerQueue(peer)
 				}
 				peer.OnChoke = func(pieces []int) {
+					logger.Info("OnChoke ran", "free_pieces", pieces)
 					for _, piece := range pieces {
-						pm.unassign(piece)
+						pm.FreePiece(piece)
 					}
 				}
 

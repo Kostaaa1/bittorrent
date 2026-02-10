@@ -2,7 +2,6 @@ package peer
 
 import "sync"
 
-// TODO: improve with channel
 // pipeline is responsible to dispatch the requests for current (assigned piece).
 // each peer can have up to maxPendingLimit assigned pieces
 type pipeline struct {
@@ -35,33 +34,47 @@ func newPipeline() *pipeline {
 	}
 }
 
-func (pp *pipeline) addQueue(piece int) {
-	pp.mu.Lock()
-	pp.pieces[piece] = true
-	pp.mu.Unlock()
+func (p *pipeline) addQueue(piece int) {
+	p.mu.Lock()
+	p.pieces[piece] = true
+	p.mu.Unlock()
 }
 
-func (pp *pipeline) canAssign() bool {
-	pp.mu.Lock()
-	defer pp.mu.Unlock()
+func (p *pipeline) canAssign() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	l := len(pp.pieces)
-	return l < pp.maxPendingLimit
+	l := len(p.pieces)
+	return l < p.maxPendingLimit
 }
 
-func (pp *pipeline) assignNext() bool {
-	pp.mu.Lock()
-	defer pp.mu.Unlock()
+// func (p *pipeline) drain() []int {
+// 	if p == nil {
+// 		return nil
+// 	}
+// 	p.mu.Lock()
+// 	left := make([]int, len(p.pieces))
+// 	for piece := range p.pieces {
+// 		left = append(left, piece)
+// 	}
+// 	p.mu.Unlock()
+// 	p = nil
+// 	return left
+// }
 
-	if len(pp.pieces) == 0 {
-		pp.curr = nil
+func (p *pipeline) assignNext() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if len(p.pieces) == 0 {
+		p.curr = nil
 		return false
 	}
 
-	for piece := range pp.pieces {
-		delete(pp.pieces, piece)
-		p := piece
-		pp.curr = &p
+	for piece := range p.pieces {
+		delete(p.pieces, piece)
+		c := piece
+		p.curr = &c
 		return true
 	}
 

@@ -16,25 +16,32 @@ func (b Bitfield) HasPiece(index int) bool {
 	return b[byteIndex]>>(7-offset)&1 == 1
 }
 
-func (b Bitfield) SetPiece(index int) bool {
-	return false
+func (b Bitfield) SetPiece(index int) {
+	byteIndex := index / 8
+	offset := index % 8
+	b[byteIndex] |= 1 << (7 - offset)
+	// b[byteIndex] ^= 1 << (7 - offset)
 }
 
 func (peer *Peer) CanRequest() bool {
 	return peer.amInterested && !peer.peerChoking
 }
 
-// func (peer *Peer) Print() {
-// 	peer.log.Info("[PEER INFO]",
-// 		"addr", peer.Addr,
-// 		"assigned_pieces", len(peer.pipeline.pieces),
-// 		"can_request", peer.CanRequest(),
-// 		"pipeline.curr", peer.pipeline.curr,
-// 		"pipeline.inflight", peer.pipeline.inflight,
-// 		"pipeline.windowSize", peer.pipeline.windowSize,
-// 		"pipeline.nextBlock", peer.pipeline.nextBlock,
-// 	)
-// }
+func (peer *Peer) Print() {
+	peer.log.Info("[PEER INFO]",
+		"addr", peer.Addr,
+		"can_request", peer.CanRequest(),
+	)
+	if peer.pipeline != nil {
+		fmt.Println(
+			"pipeline.assigned", len(peer.pipeline.pieces),
+			"pipeline.curr", peer.pipeline.curr,
+			"pipeline.inflight", peer.pipeline.inflight,
+			"pipeline.windowSize", peer.pipeline.windowSize,
+			"pipeline.nextBlock", peer.pipeline.nextBlock,
+		)
+	}
+}
 
 func (peer *Peer) dispatchRequests() {
 	if !peer.CanRequest() {
@@ -43,14 +50,12 @@ func (peer *Peer) dispatchRequests() {
 
 	if peer.pipeline.curr == nil {
 		if assigned := peer.pipeline.assignNext(); !assigned {
-			peer.log.Info("NO ASSIGNED FOR PEER EARLY")
 			return
 		}
 	}
 
 	for peer.pipeline.inflight < peer.pipeline.windowSize {
 		if peer.pipeline.curr == nil {
-			peer.log.Info("NO ASSIGNED FOR PEER")
 			return
 		}
 
@@ -77,10 +82,8 @@ func (peer *Peer) dispatchRequests() {
 		if peer.pipeline.nextBlock >= peer.info.numBlocksPerPiece {
 			peer.pipeline.nextBlock = 0
 			if assigned := peer.pipeline.assignNext(); !assigned {
-				peer.log.Info("NO ASSIGNED FOR PEER LATE")
 				return
 			}
-
 		}
 	}
 }
@@ -250,7 +253,7 @@ func (p *Peer) Open(hs Handshake) error {
 
 			if p.pipeline != nil {
 				p.pipeline.mu.Lock()
-				left := make([]int, len(p.pipeline.pieces))
+				left := make([]int, 0)
 				for piece := range p.pipeline.pieces {
 					left = append(left, piece)
 				}
@@ -289,10 +292,12 @@ func (p *Peer) Open(hs Handshake) error {
 				"len", len(piece.Block),
 			)
 
-			if p.pipeline.inflight > 0 {
-				p.pipeline.inflight--
+			if p.pipeline != nil {
+				if p.pipeline.inflight > 0 {
+					p.pipeline.inflight--
+				}
+				p.dispatchRequests()
 			}
-			p.dispatchRequests()
 
 		case MsgHave:
 			p.log.Debug("[REQUEST]")
