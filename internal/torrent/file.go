@@ -74,7 +74,9 @@ func (pm *PieceManager) fillPeerQueue(peer *peer.Peer) {
 			if peer.HasPiece(pieceID) {
 				delete(pm.unassigned, pieceID)
 				pm.assigned[pieceID] = peer.ID
+
 				peer.AddPieceToQueue(pieceID)
+
 				assigned = true
 				break
 			}
@@ -124,6 +126,9 @@ func (tf *TorrentFile) DiscoverPeers(
 	c chan<- tracker.PeerAddress,
 	req *tracker.AnnounceRequest,
 ) error {
+	// c <- tracker.PeerAddress{IP: "185.149.91.39", Port: 20046}
+	// return nil
+
 	if len(tf.AnnounceList) > 0 {
 		for _, list := range tf.AnnounceList {
 			for _, ann := range list {
@@ -194,22 +199,12 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 
 	var wg sync.WaitGroup
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		ticker := time.NewTicker(time.Second * 30)
-		for range ticker.C {
-			for _, p := range pm.peers {
-				p.Print()
-			}
-		}
-	}()
-
 	f, err := os.OpenFile("log.txt", os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		panic(err)
 	}
 	defer f.Close()
+
 	writerLog := log.New(f, "", log.Ldate|log.Ltime)
 
 	wg.Add(1)
@@ -222,9 +217,9 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 					pm.unassign(result.Index)
 				} else {
 					peer := pm.getAssignedPeer(result.Index)
-					logger.Debug("[DOWNLOADED]", "piece", result.Index, "peer_addr", peer.Addr, "peer_id", peer.ID, "num_of_peers", len(pm.peers), "left_unassigned", len(pm.unassigned))
+					logger.Debug("[DOWNLOADED]", "piece", result.Index, "peer_addr", peer.Addr, "peer_id", peer.ID, "num_of_peers", len(pm.peers), "left_unassigned", len(pm.unassigned), "len_block", result.LenBlock)
 
-					writerLog.Println("[DOWNLOADED]", "piece", result.Index, "peer_addr", peer.Addr, "num_of_peers", len(pm.peers), "offset", result.Begin, "block_size", result.LenBlock, "actual_write_size", result.Written)
+					writerLog.Println("[DOWNLOADED]", "piece", result.Index, "peer_addr", peer.Addr, "num_of_peers", len(pm.peers), "offset", result.Begin, "block_size", result.LenBlock)
 
 					pm.fillPeerQueue(peer)
 				}
@@ -233,6 +228,7 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 	}()
 
 	sem := make(chan struct{}, 10)
+
 	tick := time.NewTicker(3 * time.Second)
 	go func() {
 		for range tick.C {

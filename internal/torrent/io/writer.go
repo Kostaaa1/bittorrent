@@ -30,7 +30,6 @@ type Result struct {
 	Index    int
 	Begin    int
 	LenBlock int
-	Written  int
 	Err      error
 }
 
@@ -122,14 +121,9 @@ func (pw *PieceWriter) Start() error {
 
 			if !piece.verify() {
 				result.Err = fmt.Errorf("hashes do not match for piece %d", msg.Index)
-				pw.results <- result
-			}
-
-			n, err := pw.WritePiece(msg.Index, piece.buffer)
-			if err != nil {
+			} else if _, err := pw.WritePiece(msg.Index, piece.buffer); err != nil {
 				result.Err = err
 			}
-			result.Written = n
 
 			pw.results <- result
 		}
@@ -151,22 +145,33 @@ func (w *PieceWriter) getFileEntry(pieceIndex int) (entry *FileEntry, id int, er
 	return
 }
 
-func (w *PieceWriter) openFile(fullPath string) (*os.File, error) {
+func (w *PieceWriter) setEntryFile(entry *FileEntry) error {
+	if entry.file != nil {
+		return nil
+	}
+
+	fullPath := entry.FullPath
 	dir := filepath.Dir(fullPath)
 
 	info, err := os.Stat(dir)
 	if err == nil && !info.IsDir() {
-		return nil, fmt.Errorf("%s exists but is not a directory", dir)
+		return fmt.Errorf("%s exists but is not a directory", dir)
 	}
 	if err != nil && !os.IsNotExist(err) {
-		return nil, err
+		return err
 	}
 
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return nil, err
+		return err
 	}
 
-	return os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	f, err := os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	entry.file = f
+
+	return nil
 }
 
 func (w *PieceWriter) WritePiece(pieceIndex int, piece []byte) (int, error) {
@@ -175,12 +180,8 @@ func (w *PieceWriter) WritePiece(pieceIndex int, piece []byte) (int, error) {
 		return 0, err
 	}
 
-	if entry.file == nil {
-		f, err := w.openFile(entry.FullPath)
-		if err != nil {
-			return 0, err
-		}
-		entry.file = f
+	if err := w.setEntryFile(entry); err != nil {
+		return 0, err
 	}
 
 	pieceOffset := pieceIndex * w.pieceLength
@@ -202,11 +203,9 @@ func (w *PieceWriter) WritePiece(pieceIndex int, piece []byte) (int, error) {
 			fileID++
 			entry = w.files[fileID]
 
-			f, err := w.openFile(entry.FullPath)
-			if err != nil {
-				log.Fatal(err)
+			if err := w.setEntryFile(entry); err != nil {
+				return 0, err
 			}
-			entry.file = f
 
 			remainderN, err := entry.file.WriteAt(remainder, 0)
 			if err != nil {

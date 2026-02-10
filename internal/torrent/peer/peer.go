@@ -24,29 +24,38 @@ func (peer *Peer) CanRequest() bool {
 	return peer.amInterested && !peer.peerChoking
 }
 
-func (peer *Peer) Print() {
-	pp := peer.pipeline
-	peer.log.Info(
-		"[INFO PEER]",
-		"inflight", pp.inflight,
-		"unassigned_length", len(pp.pendingPieces),
-	)
-}
+// func (peer *Peer) Print() {
+// 	peer.log.Info("[PEER INFO]",
+// 		"addr", peer.Addr,
+// 		"assigned_pieces", len(peer.pipeline.pieces),
+// 		"can_request", peer.CanRequest(),
+// 		"pipeline.curr", peer.pipeline.curr,
+// 		"pipeline.inflight", peer.pipeline.inflight,
+// 		"pipeline.windowSize", peer.pipeline.windowSize,
+// 		"pipeline.nextBlock", peer.pipeline.nextBlock,
+// 	)
+// }
 
 func (peer *Peer) dispatchRequests() {
 	if !peer.CanRequest() {
 		return
 	}
 
-	pipeline := peer.pipeline
-
-	if pipeline.curr == nil {
-		pipeline.assignNext()
+	if peer.pipeline.curr == nil {
+		if assigned := peer.pipeline.assignNext(); !assigned {
+			peer.log.Info("NO ASSIGNED FOR PEER EARLY")
+			return
+		}
 	}
 
-	for pipeline.inflight < pipeline.windowSize {
-		index := *pipeline.curr
-		begin := pipeline.nextBlock * peer.info.blockSize
+	for peer.pipeline.inflight < peer.pipeline.windowSize {
+		if peer.pipeline.curr == nil {
+			peer.log.Info("NO ASSIGNED FOR PEER")
+			return
+		}
+
+		index := *peer.pipeline.curr
+		begin := peer.pipeline.nextBlock * peer.info.blockSize
 		blockLen := peer.info.blockSize
 
 		lastPieceID := peer.info.numOfPieces - 1
@@ -60,12 +69,18 @@ func (peer *Peer) dispatchRequests() {
 
 		peer.sendRequest(index, begin, blockLen)
 
-		pipeline.inflight++
-		pipeline.nextBlock++
+		if peer.pipeline.inflight+1 <= peer.pipeline.windowSize {
+			peer.pipeline.inflight++
+			peer.pipeline.nextBlock++
+		}
 
-		if pipeline.nextBlock >= peer.info.numBlocksPerPiece {
-			pipeline.nextBlock = 0
-			pipeline.assignNext()
+		if peer.pipeline.nextBlock >= peer.info.numBlocksPerPiece {
+			peer.pipeline.nextBlock = 0
+			if assigned := peer.pipeline.assignNext(); !assigned {
+				peer.log.Info("NO ASSIGNED FOR PEER LATE")
+				return
+			}
+
 		}
 	}
 }
@@ -117,76 +132,19 @@ type Peer struct {
 	OnUnchoke             func()
 }
 
-// pipeline is responsible to dispatch the requests for current (assigned piece).
-// each peer can have up to maxPendingLimit assigned pieces
-type pipeline struct {
-	// window size represents the limit of inflight requests
-	windowSize int
-	// inflight requests bounded by the window size
-	inflight int
-	// tracking next block to request
-	nextBlock int
-	// queue for assigned pieces
-	pendingPieces   chan int
-	maxPendingLimit int
-	// active assigned piece
-	curr *int
-}
-
-func (pp *pipeline) assignNext() {
-	if len(pp.pendingPieces) == 0 {
-		pp.curr = nil
-		return
-	}
-	piece := <-pp.pendingPieces
-	pp.curr = &piece
-}
-
-func (p *pipeline) close() []int {
-	pieces := make([]int, 0)
-	for piece := range p.pendingPieces {
-		pieces = append(pieces, piece)
-	}
-	close(p.pendingPieces)
-	p.pendingPieces = nil
-	p.curr = nil
-	p.inflight = 0
-	p.nextBlock = 0
-	return pieces
-}
-
 func (peer *Peer) CanAssign() bool {
-	pp := peer.pipeline
-	l := len(pp.pendingPieces)
-	return l < pp.maxPendingLimit
+	return peer.pipeline.canAssign()
 }
 
-func New(
-	id uint64,
-	conn net.Conn,
-	writer chan<- PieceMessage,
-	log *slog.Logger,
-) *Peer {
-	windowSize := 16
-	maxPendingLimit := 10
-
-	pipeline := &pipeline{
-		windowSize:      windowSize,
-		inflight:        0,
-		nextBlock:       0,
-		pendingPieces:   make(chan int, maxPendingLimit),
-		maxPendingLimit: maxPendingLimit,
-	}
-
+func New(id uint64, conn net.Conn, w chan<- PieceMessage, log *slog.Logger) *Peer {
 	return &Peer{
 		ID:           id,
 		Addr:         conn.RemoteAddr().String(),
 		conn:         conn,
 		amInterested: false,
 		peerChoking:  true,
-		writer:       writer,
+		writer:       w,
 		log:          log,
-		pipeline:     pipeline,
 	}
 }
 
@@ -199,7 +157,7 @@ func (p *Peer) HasPiece(pieceIndex int) bool {
 
 func (peer *Peer) AddPieceToQueue(pieceID int) {
 	peer.log.Debug("[ASSIGN]", "piece", pieceID, "peer", peer.conn.RemoteAddr())
-	peer.pipeline.pendingPieces <- pieceID
+	peer.pipeline.addQueue(pieceID)
 }
 
 func (p *Peer) writeMsg(msg Message) error {
@@ -239,7 +197,11 @@ func (p *Peer) sendHave() {
 }
 
 func (p *Peer) sendRequest(index, begin, block int) error {
-	p.log.Debug("[REQUEST]", "piece", index, "begin", begin, "block", block, "assigned_pieces", len(p.pipeline.pendingPieces))
+	p.log.Debug("[REQUEST]",
+		"piece", index,
+		"begin", begin,
+		"block", block,
+	)
 	payload := FormatRequest(index, begin, block)
 	return p.writeMsg(Message{ID: MsgRequest, Payload: payload})
 }
@@ -285,11 +247,23 @@ func (p *Peer) Open(hs Handshake) error {
 		case MsgChoke:
 			p.log.Debug("[CHOKE]")
 			p.peerChoking = true
-			leftover := p.pipeline.close()
-			p.OnChoke(leftover)
+
+			if p.pipeline != nil {
+				p.pipeline.mu.Lock()
+				left := make([]int, len(p.pipeline.pieces))
+				for piece := range p.pipeline.pieces {
+					left = append(left, piece)
+				}
+				p.pipeline.mu.Unlock()
+				p.pipeline = nil
+				p.OnChoke(left)
+			}
+
 		case MsgUnchoke:
 			p.log.Debug("[UNCHOKE]")
+
 			p.peerChoking = false
+			p.pipeline = newPipeline()
 			p.OnUnchoke()
 			p.dispatchRequests()
 		case MsgInterested:
@@ -306,9 +280,6 @@ func (p *Peer) Open(hs Handshake) error {
 			p.bitfield = msg.Payload
 		case MsgPiece:
 			piece := ParsePieceMessage(msg.Payload)
-
-			p.pipeline.inflight--
-			p.dispatchRequests()
 			p.writer <- piece
 
 			p.log.Debug(
@@ -317,6 +288,11 @@ func (p *Peer) Open(hs Handshake) error {
 				"begin", piece.Begin,
 				"len", len(piece.Block),
 			)
+
+			if p.pipeline.inflight > 0 {
+				p.pipeline.inflight--
+			}
+			p.dispatchRequests()
 
 		case MsgHave:
 			p.log.Debug("[REQUEST]")
@@ -352,3 +328,7 @@ func (p *Peer) initiateHandshake(hs Handshake) error {
 
 	return nil
 }
+
+// 817efb333db92ec0ef8042a184da8c039bdd1280de5bedfaf69ad1b431a5c72f  /Users/kostaarsic/Downloads/Guha Rehan - Machine Learning Interview Guide - 2025/Guha Rehan - Machine Learning Interview Guide - 2025.pdf
+
+// 67bb4502dbc99b8b44d5637cd6c995040ad3748957f4ea2ef7f5981f0ae44e2b  /Users/kostaarsic/Downloads/Guha Rehan - Machine Learning Interview Guide - 2025/Guha Rehan - Machine Learning Interview Guide - 2025.epub
