@@ -2,6 +2,7 @@ package pieces
 
 import (
 	"sync"
+	"test/internal/torrent/io"
 	"test/internal/torrent/peer"
 )
 
@@ -75,6 +76,27 @@ func (pm *PieceManager) FillPeerQueue(peer *peer.Peer) {
 		}
 		if !assigned {
 			break
+		}
+	}
+}
+
+func (pm *PieceManager) CollectResults(results <-chan io.Result) {
+	for result := range results {
+		if result.Err != nil {
+			// logger.Error("[FAIL DOWNLOAD]", "piece", result.Index, "error", result.Err)
+			pm.FreePiece(result.Index)
+		} else {
+			pm.SetPiece(result.Index)
+			peer := pm.GetAssignedPeer(result.Index)
+			// logger.Debug("[DOWNLOADED]",
+			// 	"piece", result.Index,
+			// 	"peer_addr", peer.Addr,
+			// 	"peer_id", peer.ID,
+			// 	// "num_of_peers", len(pm.peers),
+			// 	// "left_unassigned", len(pm.unassigned),
+			// 	"len_block", result.LenBlock,
+			// )
+			pm.FillPeerQueue(peer)
 		}
 	}
 }

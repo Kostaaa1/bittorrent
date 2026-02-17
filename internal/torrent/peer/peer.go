@@ -67,6 +67,14 @@ func (peer *Peer) dispatchRequests() {
 
 		if index == lastPieceID {
 			remaining := peer.info.totalLength - (lastPieceID * peer.info.pieceLength) - begin
+
+			// if remaining < 0 {
+			// 	if assigned := peer.pipeline.assignNext(); !assigned {
+			// 		return
+			// 	}
+			// 	continue
+			// }
+
 			if remaining < blockLen {
 				blockLen = remaining
 			}
@@ -80,7 +88,6 @@ func (peer *Peer) dispatchRequests() {
 		}
 
 		if peer.pipeline.nextBlock >= peer.info.numBlocksPerPiece {
-			peer.pipeline.nextBlock = 0
 			if assigned := peer.pipeline.assignNext(); !assigned {
 				return
 			}
@@ -249,27 +256,12 @@ func (p *Peer) Open(hs Handshake) error {
 		switch msg.ID {
 		case MsgChoke:
 			p.log.Debug("[CHOKE]")
-
 			p.peerChoking = true
 			if toReassign := p.pipeline.destroy(); len(toReassign) > 0 {
 				p.OnChoke(toReassign)
 			}
-
-			// if p.pipeline != nil {
-			// 	p.pipeline.mu.Lock()
-			// 	left := make([]int, 0)
-			// 	for piece := range p.pipeline.pieces {
-			// 		left = append(left, piece)
-			// 	}
-			// 	p.pipeline.mu.Unlock()
-			// 	p.pipeline = nil
-			// 	p.OnChoke(left)
-			// }
-			// p.OnChoke(left)
-
 		case MsgUnchoke:
 			p.log.Debug("[UNCHOKE]")
-
 			p.peerChoking = false
 			p.pipeline = newPipeline()
 			p.OnUnchoke()
@@ -289,14 +281,6 @@ func (p *Peer) Open(hs Handshake) error {
 		case MsgPiece:
 			piece := ParsePieceMessage(msg.Payload)
 			p.writer <- piece
-
-			p.log.Debug(
-				"[PIECE]",
-				"piece", piece.Index,
-				"begin", piece.Begin,
-				"len", len(piece.Block),
-			)
-
 			if p.pipeline != nil {
 				if p.pipeline.inflight > 0 {
 					p.pipeline.inflight--
@@ -304,6 +288,12 @@ func (p *Peer) Open(hs Handshake) error {
 				p.dispatchRequests()
 			}
 
+			p.log.Debug(
+				"[PIECE]",
+				"piece", piece.Index,
+				"begin", piece.Begin,
+				"len", len(piece.Block),
+			)
 		case MsgHave:
 			p.log.Debug("[REQUEST]")
 		case MsgCancel:

@@ -1,22 +1,12 @@
 package peer
 
-// pipeline is responsible to dispatch the requests for current (assigned piece).
-// each peer can have up to maxPendingLimit assigned pieces
 type pipeline struct {
-	// window size represents the limit of inflight requests
-	windowSize int
-	// inflight requests bounded by the window size
-	inflight int
-	// tracking next block to request
-	nextBlock int
-	// queue for assigned pieces
-	pieces chan int
-	// pieces          map[int]bool
-	// mu              sync.Mutex
-
+	windowSize      int
+	inflight        int
+	nextBlock       int
+	pieces          chan int
 	maxPendingLimit int
-	// active assigned piece
-	curr *int
+	curr            *int
 }
 
 func newPipeline() *pipeline {
@@ -56,6 +46,8 @@ func (p *pipeline) destroy() []int {
 }
 
 func (p *pipeline) assignNext() bool {
+	p.nextBlock = 0
+
 	if len(p.pieces) == 0 {
 		p.curr = nil
 		return false

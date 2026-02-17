@@ -4,6 +4,7 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"test/internal/torrent/peer"
@@ -19,11 +20,12 @@ type FileEntry struct {
 }
 
 type PieceBuffer struct {
-	index      int
-	size       int
-	hash       [20]byte
-	buffer     []byte
-	blockCount int
+	index       int
+	size        int
+	hash        [20]byte
+	buffer      []byte
+	blockCount  int
+	totalBlocks int
 }
 
 type Result struct {
@@ -47,12 +49,13 @@ type PieceWriter struct {
 	numOfPieces       int
 	totalLength       int
 	pieceLength       int
-
-	hashPieces [][20]byte
-	pieces     map[int]*PieceBuffer
-	worker     chan peer.PieceMessage
-	files      []*FileEntry
-	results    chan Result
+	blockSize         int
+	hashPieces        [][20]byte
+	pieces            map[int]*PieceBuffer
+	worker            chan peer.PieceMessage
+	files             []*FileEntry
+	results           chan Result
+	log               *log.Logger
 }
 
 func NewPieceWriter(
@@ -61,14 +64,19 @@ func NewPieceWriter(
 	entries []*FileEntry,
 	totalLength,
 	numBlocksPerPiece int,
+	blockSize int,
 ) *PieceWriter {
+	f, _ := os.OpenFile("log2.txt", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	log := log.New(f, "", log.Ldate|log.Ltime)
 	return &PieceWriter{
+		log:               log,
 		worker:            make(chan peer.PieceMessage),
 		results:           make(chan Result),
 		pieces:            make(map[int]*PieceBuffer),
 		files:             entries,
 		hashPieces:        pieces,
 		pieceLength:       pieceLength,
+		blockSize:         blockSize,
 		numBlocksPerPiece: numBlocksPerPiece,
 		numOfPieces:       len(pieces),
 		totalLength:       totalLength,
@@ -79,26 +87,29 @@ func (pw *PieceWriter) Channles() (chan peer.PieceMessage, <-chan Result) {
 	return pw.worker, pw.results
 }
 
-func (pw *PieceWriter) getPieceSize(pieceIndex int) int {
+func (pw *PieceWriter) getPieceSize(pieceIndex int) (int, int) {
 	size := pw.pieceLength
+	blocks := pw.numBlocksPerPiece
 	lastPiece := pw.numOfPieces - 1
 	if pieceIndex == lastPiece {
 		size = pw.totalLength - (lastPiece * pw.pieceLength)
+		blocks = int(math.Ceil(float64(size) / float64(pw.blockSize)))
 	}
-	return size
+	return size, blocks
 }
 
 func (pw *PieceWriter) writeBlock(msg peer.PieceMessage) *PieceBuffer {
 	pbuf := pw.pieces[msg.Index]
 
 	if pbuf == nil {
-		size := pw.getPieceSize(msg.Index)
+		size, blocks := pw.getPieceSize(msg.Index)
 		pbuf = &PieceBuffer{
-			index:      msg.Index,
-			blockCount: 0,
-			size:       size,
-			buffer:     make([]byte, size),
-			hash:       pw.hashPieces[msg.Index],
+			totalBlocks: blocks,
+			index:       msg.Index,
+			blockCount:  0,
+			size:        size,
+			buffer:      make([]byte, size),
+			hash:        pw.hashPieces[msg.Index],
 		}
 	}
 
@@ -112,7 +123,7 @@ func (pw *PieceWriter) Start() error {
 	for msg := range pw.worker {
 		piece := pw.writeBlock(msg)
 
-		if piece.blockCount == pw.numBlocksPerPiece {
+		if piece.blockCount == piece.totalBlocks {
 			result := Result{
 				Index:    msg.Index,
 				Begin:    msg.Begin,
@@ -121,7 +132,7 @@ func (pw *PieceWriter) Start() error {
 
 			if !piece.verify() {
 				result.Err = fmt.Errorf("hashes do not match for piece %d", msg.Index)
-			} else if _, err := pw.WritePiece(msg.Index, piece.buffer); err != nil {
+			} else if _, err := pw.writePiece(msg.Index, piece.buffer); err != nil {
 				result.Err = err
 			}
 
@@ -174,7 +185,17 @@ func (w *PieceWriter) setEntryFile(entry *FileEntry) error {
 	return nil
 }
 
-func (w *PieceWriter) WritePiece(pieceIndex int, piece []byte) (int, error) {
+func (w *PieceWriter) writeAt(entry *FileEntry, pieceIndex int, piece []byte, offset int64) int {
+	w.log.Printf("[PIECE DOWNLOAD] - file=%s, piece_index=%d, piece_size=%d, offset=%d\n", entry.file.Name(), pieceIndex, len(piece), offset)
+
+	n, err := entry.file.WriteAt(piece, offset)
+	if err != nil {
+		log.Fatal("failed to writeAt", entry.FullPath, err)
+	}
+	return n
+}
+
+func (w *PieceWriter) writePiece(pieceIndex int, piece []byte) (int, error) {
 	entry, fileID, err := w.getFileEntry(pieceIndex)
 	if err != nil {
 		return 0, err
@@ -194,10 +215,12 @@ func (w *PieceWriter) WritePiece(pieceIndex int, piece []byte) (int, error) {
 		remainder := piece[diff:]
 		remainderLen := len(remainder)
 
-		_, err := entry.file.WriteAt(start, int64(entryOffset))
-		if err != nil {
-			log.Fatal("failed to writeAt", entry.FullPath, err)
-		}
+		// _, err := entry.file.WriteAt(start, int64(entryOffset))
+		// if err != nil {
+		// 	log.Fatal("failed to writeAt", entry.FullPath, err)
+		// }
+
+		w.writeAt(entry, pieceIndex, start, int64(entryOffset))
 
 		for remainderLen > 0 {
 			fileID++
@@ -207,20 +230,24 @@ func (w *PieceWriter) WritePiece(pieceIndex int, piece []byte) (int, error) {
 				return 0, err
 			}
 
-			remainderN, err := entry.file.WriteAt(remainder, 0)
-			if err != nil {
-				log.Fatal("failed to writeAt", entry.FullPath, err)
-			}
+			// remainderN, err := entry.file.WriteAt(remainder, 0)
+			// if err != nil {
+			// 	log.Fatal("failed to writeAt", entry.FullPath, err)
+			// }
+
+			remainderN := w.writeAt(entry, pieceIndex, remainder, 0)
 			remainderLen -= remainderN
 		}
 
 		return len(piece), nil
 	}
 
-	n, err := entry.file.WriteAt(piece, int64(entryOffset))
-	if err != nil {
-		return 0, err
-	}
+	// n, err := entry.file.WriteAt(piece, int64(entryOffset))
+	// if err != nil {
+	// 	return 0, err
+	// }
+
+	n := w.writeAt(entry, pieceIndex, piece, int64(entryOffset))
 
 	return n, nil
 }

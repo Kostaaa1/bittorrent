@@ -188,42 +188,18 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 		tf.Files,
 		tf.TotalLength,
 		numBlocksPerPiece,
+		blockSize,
 	)
-	writerC, resultC := writer.Channles()
-	go writer.Start()
 
+	writerC, resultC := writer.Channles()
 	pm := pieces.NewPieceManager(tf.Pieces)
+
+	var peerCounter uint64 = 0
+
 	logger := newLogger()
 
-	var wg sync.WaitGroup
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			for result := range resultC {
-				if result.Err != nil {
-					logger.Error("[FAIL DOWNLOAD]", "piece", result.Index, "error", result.Err)
-					pm.FreePiece(result.Index)
-				} else {
-					pm.SetPiece(result.Index)
-
-					peer := pm.GetAssignedPeer(result.Index)
-
-					logger.Debug("[DOWNLOADED]",
-						"piece", result.Index,
-						"peer_addr", peer.Addr,
-						"peer_id", peer.ID,
-						// "num_of_peers", len(pm.peers),
-						// "left_unassigned", len(pm.unassigned),
-						"len_block", result.LenBlock,
-					)
-
-					pm.FillPeerQueue(peer)
-				}
-			}
-		}
-	}()
+	go writer.Start()
+	go pm.CollectResults(resultC)
 
 	sem := make(chan struct{}, 10)
 
@@ -234,7 +210,7 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 		}
 	}()
 
-	var peerCounter uint64 = 0
+	var wg sync.WaitGroup
 
 	wg.Add(1)
 
@@ -246,9 +222,7 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 				sem <- struct{}{}
 				defer func() { <-sem }()
 
-				addr := p.IP4Addr()
-
-				conn, err := net.DialTimeout("tcp", addr, time.Second*15)
+				conn, err := net.DialTimeout("tcp", p.IP4Addr(), time.Second*15)
 				if err != nil {
 					logger.Error("failed to dial", "error", err)
 					return
@@ -264,9 +238,6 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 					blockSize,
 					numBlocksPerPiece,
 				)
-
-				pm.AddPeer(peer)
-
 				peer.OnUnchoke = func() {
 					pm.FillPeerQueue(peer)
 				}
@@ -277,6 +248,8 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 					}
 				}
 
+				pm.AddPeer(peer)
+
 				if err := peer.Open(hs); err != nil {
 					logger.Error("[PEER DISCONNECT]", "error: failed to read message", err)
 					return
@@ -285,16 +258,15 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 		}
 	}()
 
-	annReq := &tracker.AnnounceRequest{
-		InfoHash: tf.InfoHash,
-		PeerID:   clientID,
-		Port:     port,
-		Left:     tf.TotalLength,
-	}
-
-	if err := tf.DiscoverPeers(peerCh, annReq); err != nil {
-		return err
-	}
+	// annReq := &tracker.AnnounceRequest{
+	// 	InfoHash: tf.InfoHash,
+	// 	PeerID:   clientID,
+	// 	Port:     port,
+	// 	Left:     tf.TotalLength,
+	// }
+	// if err := tf.DiscoverPeers(peerCh, annReq); err != nil {
+	// 	return err
+	// }
 
 	wg.Wait()
 

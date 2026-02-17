@@ -55,7 +55,7 @@ type AnnounceRequest struct {
 	// info_hash, key, peer_id, port, downloaded, left, uploaded and compact
 	InfoHash   [20]byte
 	PeerID     [20]byte
-	Port       uint16 // typically 6881-6889
+	Port       uint16
 	Uploaded   int
 	Downloaded int
 	Left       int
@@ -94,6 +94,12 @@ func buildHTTPTrackerURL(p AnnounceRequest) (string, error) {
 		"uploaded":   []string{strconv.Itoa(p.Uploaded)},
 		"downloaded": []string{strconv.Itoa(p.Downloaded)},
 		"left":       []string{strconv.Itoa(p.Left)},
+		"corrupt":    []string{"0"},
+		// "key": []string{},
+		"event":      []string{"started"},
+		"numwant":    []string{"100"},
+		"compact":    []string{"1"},
+		"no_peer_id": []string{"1"},
 	}
 
 	parsed.RawQuery = v.Encode()
