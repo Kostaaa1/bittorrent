@@ -100,7 +100,7 @@ func (tf *TorrentFile) Download(ctx context.Context, clientID [20]byte, port uin
 		tf.InfoHash,
 		clientID,
 		port,
-		int64(tf.TotalLength),
+		uint64(tf.TotalLength),
 		peerCh,
 		tf.Announce,
 		tf.AnnounceList,
@@ -111,13 +111,13 @@ func (tf *TorrentFile) Download(ctx context.Context, clientID [20]byte, port uin
 	go writer.Start()
 	go client.CollectResults(announcer, logger, resultC)
 
-	sem := make(chan struct{}, 10)
-	tick := time.NewTicker(time.Second)
-	go func() {
-		for range tick.C {
-			<-sem
-		}
-	}()
+	// sem := make(chan struct{}, 30)
+	// tick := time.NewTicker(time.Second)
+	// go func() {
+	// 	for range tick.C {
+	// 		<-sem
+	// 	}
+	// }()
 
 	var wg sync.WaitGroup
 
@@ -128,8 +128,8 @@ func (tf *TorrentFile) Download(ctx context.Context, clientID [20]byte, port uin
 
 		for p := range peerCh {
 			go func() {
-				sem <- struct{}{}
-				defer func() { <-sem }()
+				// sem <- struct{}{}
+				// defer func() { <-sem }()
 
 				conn, err := net.DialTimeout("tcp", p.IP4Addr(), time.Second*5)
 				if err != nil {

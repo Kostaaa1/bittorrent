@@ -56,9 +56,9 @@ type AnnounceRequest struct {
 	InfoHash   [20]byte
 	PeerID     [20]byte
 	Port       uint16
-	Uploaded   int64
-	Downloaded int64
-	Left       int64
+	Uploaded   uint64
+	Downloaded uint64
+	Left       uint64
 	Compact    bool
 	NoPeerID   bool // ignored if compact is enabled
 	// started: The first request to the tracker must include the event key with this value.
@@ -66,33 +66,11 @@ type AnnounceRequest struct {
 	// completed: Must be sent to the tracker when the download completes. However, must not be sent if the download was already 100% complete when the client started. Presumably, this is to allow the tracker to increment the "completed downloads" metric based solely on this event.
 	Event string // "started, completed, stopped"
 	// IP *string
-	NumWant   uint64
+	NumWant   int32
 	Key       *string
 	TrackerID *string
 	// key: Optional. An additional identification that is not shared with any other peers. It is intended to allow a client to prove their identity should their IP address change.
 	// trackerid: Optional. If a previous announce contained a tracker id, it should be set here.
-}
-
-func (req AnnounceRequest) UDPBytes(connID [8]byte) []byte {
-	request := make([]byte, 98)
-
-	binary.Encode(request, binary.BigEndian, connID)
-	binary.BigEndian.PutUint32(request[8:12], 1)
-	binary.Encode(request[16:36], binary.BigEndian, req.InfoHash)
-	binary.Encode(request[36:56], binary.BigEndian, req.PeerID)
-	binary.BigEndian.PutUint64(request[56:64], uint64(req.Downloaded))
-	binary.BigEndian.PutUint64(request[64:72], uint64(req.Left))
-	binary.BigEndian.PutUint64(request[72:80], uint64(req.Uploaded))
-
-	// 0: none; 1: completed; 2: started; 3: stopped
-	binary.BigEndian.PutUint32(request[80:84], uint32(2))
-	binary.BigEndian.PutUint32(request[84:88], uint32(0))
-	binary.BigEndian.PutUint32(request[88:92], uint32(0))
-	binary.BigEndian.PutUint32(request[92:96], uint32(req.NumWant))
-
-	binary.BigEndian.PutUint16(request[96:98], req.Port)
-
-	return request
 }
 
 func BuildHTTPTrackerURL(req AnnounceRequest) (string, error) {
@@ -109,12 +87,13 @@ func BuildHTTPTrackerURL(req AnnounceRequest) (string, error) {
 		"downloaded": []string{strconv.Itoa(int(req.Downloaded))},
 		"left":       []string{strconv.Itoa(int(req.Left))},
 		"corrupt":    []string{"0"},
-		// "key": []string{},
+		// "key":        []string{*req.Key},
 		// "event":      []string{"started"},
 		"numwant":    []string{"100"},
 		"compact":    []string{"1"},
 		"no_peer_id": []string{"1"},
 	}
+
 	parsed.RawQuery = v.Encode()
 
 	return parsed.String(), nil

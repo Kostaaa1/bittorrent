@@ -18,17 +18,14 @@ const (
 )
 
 type Announcer struct {
-	infoHash [20]byte
-	clientID [20]byte
-	port     uint16
-
-	downloaded atomic.Int64
-	left       atomic.Int64
-	uploaded   atomic.Int64
-
-	active int
-	peerCh chan<- PeerAddress
-
+	infoHash       [20]byte
+	clientID       [20]byte
+	port           uint16
+	downloaded     atomic.Uint64
+	left           atomic.Uint64
+	uploaded       atomic.Uint64
+	active         int
+	peerCh         chan<- PeerAddress
 	announce       string
 	announceList   [][]string
 	isMultiTracker bool
@@ -38,7 +35,7 @@ func NewAnnouncer(
 	infoHash,
 	clientID [20]byte,
 	port uint16,
-	left int64,
+	left uint64,
 	peerCh chan<- PeerAddress,
 	announce string,
 	announceList [][]string,
@@ -53,18 +50,16 @@ func NewAnnouncer(
 		announce:       announce,
 		announceList:   announceList,
 	}
-
 	ann.left.Store(left)
-
 	return ann
 }
 
-func (ann *Announcer) IncDownloaded(n int64) {
+func (ann *Announcer) IncDownloaded(n uint64) {
 	ann.left.Add(-n)
 	ann.downloaded.Add(n)
 }
 
-func (ann *Announcer) IncUploaded(n int64) {
+func (ann *Announcer) IncUploaded(n uint64) {
 	ann.uploaded.Add(n)
 }
 
@@ -74,11 +69,11 @@ func (announcer *Announcer) Run(ctx context.Context) {
 	if len(announcer.announceList) > 0 {
 		for _, tier := range announcer.announceList {
 			for _, announce := range tier {
-				if !strings.HasPrefix(announce, "http") {
+				if strings.HasPrefix(announce, "http") {
 					continue
 				}
 
-				resp, err := announcer.run(announce)
+				interval, err := announcer.run(announce)
 				if err != nil {
 					fmt.Println("failed to get ther response for announce announce:", announce, err)
 					continue
@@ -89,9 +84,8 @@ func (announcer *Announcer) Run(ctx context.Context) {
 				}
 				announcer.active++
 
-				interval := resp.Interval
-				if resp.MinInterval > 0 {
-					interval = resp.MinInterval
+				if interval == 0 {
+					interval = 600
 				}
 
 				go func() {
@@ -114,17 +108,14 @@ func (announcer *Announcer) Run(ctx context.Context) {
 	} else {
 		tracker := announcer.announce
 
-		resp, err := announcer.run(tracker)
+		interval, err := announcer.run(tracker)
 		if err != nil {
 			fmt.Println("failed to get the response for announce tracker:", tracker, err)
 			return
 		}
 
-		fmt.Println("STARTING TICKER INTERVAL FOR TRACKER:", tracker, resp.MinInterval, resp.Interval)
-
-		interval := resp.Interval
-		if resp.MinInterval > 0 {
-			interval = resp.MinInterval
+		if interval == 0 {
+			interval = 600
 		}
 
 		go func() {
@@ -145,7 +136,7 @@ func (announcer *Announcer) Run(ctx context.Context) {
 	}
 }
 
-func (ann *Announcer) run(tracker string) (*AnnounceResponse, error) {
+func (ann *Announcer) run(tracker string) (uint32, error) {
 	fmt.Println("SENDING ANNOUNCE REQUEST", tracker)
 
 	annReq := AnnounceRequest{
@@ -157,28 +148,51 @@ func (ann *Announcer) run(tracker string) (*AnnounceResponse, error) {
 		Left:       ann.left.Load(),
 		Uploaded:   ann.uploaded.Load(),
 		Downloaded: ann.downloaded.Load(),
+		NumWant:    100,
 	}
 
-	url, err := BuildHTTPTrackerURL(annReq)
-	if err != nil {
-		return nil, err
+	if strings.HasPrefix(tracker, "http") {
+		url, err := BuildHTTPTrackerURL(annReq)
+		if err != nil {
+			return 0, err
+		}
+		resp, err := Announce(url)
+		if err != nil {
+			return 0, err
+		}
+		peers, err := ParsePeers(*resp)
+		if err != nil {
+			return 0, err
+		}
+		for _, peer := range peers {
+			ann.peerCh <- peer
+		}
+		return uint32(resp.MinInterval), nil
 	}
 
-	resp, err := Announce(url)
-	if err != nil {
-		return nil, err
+	if strings.HasPrefix(tracker, "udp") {
+		conn, err := DialUDPTracker(tracker)
+		if err != nil {
+			return 0, err
+		}
+		defer conn.conn.Close()
+
+		connID, err := conn.Connect()
+		if err != nil {
+			return 0, err
+		}
+
+		interval, peers, err := conn.Announce(connID, annReq)
+		if err != nil {
+			return 0, err
+		}
+
+		for _, peer := range peers {
+			ann.peerCh <- peer
+		}
+
+		return interval, nil
 	}
 
-	peers, err := ParsePeers(*resp)
-	if err != nil {
-		return nil, err
-	}
-
-	fmt.Println("RECEIVED NUMBER OF PEERS FROM TRACKER", len(peers))
-
-	for _, peer := range peers {
-		ann.peerCh <- peer
-	}
-
-	return resp, nil
+	return 0, nil
 }

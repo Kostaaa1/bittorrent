@@ -108,7 +108,7 @@ func (pm *Client) CollectResults(ann *tracker.Announcer, logger *slog.Logger, re
 		if result.Err != nil {
 			pm.FreePiece(result.Index)
 		} else {
-			ann.IncDownloaded(int64(result.LenBlock))
+			ann.IncDownloaded(uint64(result.LenBlock))
 			// notify all peers that we have a piece
 			pm.NotifyPeers(result.Index)
 			pm.SetPiece(result.Index)

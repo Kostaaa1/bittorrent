@@ -18,10 +18,8 @@ func New(trackerURL string, infoHash [20]byte, peerCh <-chan PeerAddress) (*trac
 	if err != nil {
 		return nil, err
 	}
-
 	t := &tracker{url: parsed, infoHash: infoHash}
 	t.classifyTracker()
-
 	return t, nil
 }
 
