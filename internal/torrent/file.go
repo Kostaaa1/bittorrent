@@ -1,92 +1,23 @@
 package torrent
 
 import (
+	"context"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"log/slog"
 	"math"
 	"net"
 	"os"
 	"sync"
 	"sync/atomic"
+	"test/internal/torrent/client"
 	"test/internal/torrent/io"
 	"test/internal/torrent/peer"
-	"test/internal/torrent/pieces"
 	"test/internal/torrent/tracker"
 	"test/pkg/bencode"
 	"time"
 )
-
-// type PieceManager struct {
-// 	bitfield   peer.Bitfield
-// 	mu         sync.Mutex
-// 	assigned   map[int]uint64
-// 	unassigned map[int]uint64
-// 	peers      []*peer.Peer
-// }
-
-// func NewPieceManager(pieces [][20]byte) *PieceManager {
-// 	// TODO: do this via channel in separate goroutine...
-// 	unassigned := make(map[int]uint64, len(pieces))
-// 	for index := range pieces {
-// 		unassigned[index] = 0
-// 	}
-// 	return &PieceManager{
-// 		bitfield:   make([]byte, (len(pieces)+7)/8),
-// 		assigned:   make(map[int]uint64),
-// 		unassigned: unassigned,
-// 		peers:      make([]*peer.Peer, 0),
-// 	}
-// }
-
-// func (pm *PieceManager) addPeer(peer *peer.Peer) {
-// 	pm.mu.Lock()
-// 	pm.peers = append(pm.peers, peer)
-// 	pm.mu.Unlock()
-// }
-
-// func (pm *PieceManager) getAssignedPeer(pieceIndex int) *peer.Peer {
-// 	pm.mu.Lock()
-// 	peerID, found := pm.assigned[pieceIndex]
-// 	fmt.Println("PIECE ASSIGNED TO PEER", pieceIndex, peerID)
-// 	pm.mu.Unlock()
-
-// 	if !found {
-// 		return nil
-// 	}
-
-// 	return pm.peers[peerID]
-// }
-
-// func (pm *PieceManager) unassign(pieceIndex int) {
-// 	pm.mu.Lock()
-// 	delete(pm.assigned, pieceIndex)
-// 	pm.unassigned[pieceIndex] = 0
-// 	pm.mu.Unlock()
-// }
-
-// func (pm *PieceManager) fillPeerQueue(peer *peer.Peer) {
-// 	pm.mu.Lock()
-// 	defer pm.mu.Unlock()
-
-// 	for peer.CanAssign() {
-// 		assigned := false
-// 		for pieceID := range pm.unassigned {
-// 			if peer.HasPiece(pieceID) {
-// 				delete(pm.unassigned, pieceID)
-// 				pm.assigned[pieceID] = peer.ID
-
-// 				peer.AddPieceToQueue(pieceID)
-
-// 				assigned = true
-// 				break
-// 			}
-// 		}
-// 		if !assigned {
-// 			break
-// 		}
-// 	}
-// }
 
 type TorrentFile struct {
 	TotalLength int
@@ -123,37 +54,6 @@ func NewFile(filename string) (*TorrentFile, error) {
 	return src.toTorrentFile()
 }
 
-func (tf *TorrentFile) DiscoverPeers(
-	c chan<- tracker.PeerAddress,
-	req *tracker.AnnounceRequest,
-) error {
-	if len(tf.AnnounceList) > 0 {
-		for _, list := range tf.AnnounceList {
-			for _, ann := range list {
-				req.Tracker = ann
-				peers, err := tracker.DiscoverPeers(*req)
-				if err != nil {
-					fmt.Printf("failed to discover peers: announce=%s, error=%v\n", ann, err)
-					continue
-				}
-				for _, peer := range peers {
-					c <- peer
-				}
-			}
-		}
-	} else {
-		req.Tracker = tf.Announce
-		peers, err := tracker.DiscoverPeers(*req)
-		if err != nil {
-			return err
-		}
-		for _, peer := range peers {
-			c <- peer
-		}
-	}
-	return nil
-}
-
 func newLogger() *slog.Logger {
 	opts := &slog.HandlerOptions{
 		Level: slog.LevelDebug,
@@ -169,7 +69,7 @@ func newLogger() *slog.Logger {
 	return logger
 }
 
-func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
+func (tf *TorrentFile) Download(ctx context.Context, clientID [20]byte, port uint16) error {
 	peerCh := make(chan tracker.PeerAddress)
 
 	hs := peer.Handshake{
@@ -192,18 +92,27 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 	)
 
 	writerC, resultC := writer.Channles()
-	pm := pieces.NewPieceManager(tf.Pieces)
-
+	client := client.New(tf.Pieces)
 	var peerCounter uint64 = 0
-
 	logger := newLogger()
 
+	announcer := tracker.NewAnnouncer(
+		tf.InfoHash,
+		clientID,
+		port,
+		int64(tf.TotalLength),
+		peerCh,
+		tf.Announce,
+		tf.AnnounceList,
+		true,
+	)
+
+	go announcer.Run(ctx)
 	go writer.Start()
-	go pm.CollectResults(resultC)
+	go client.CollectResults(announcer, logger, resultC)
 
 	sem := make(chan struct{}, 10)
-
-	tick := time.NewTicker(3 * time.Second)
+	tick := time.NewTicker(time.Second)
 	go func() {
 		for range tick.C {
 			<-sem
@@ -222,7 +131,7 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 				sem <- struct{}{}
 				defer func() { <-sem }()
 
-				conn, err := net.DialTimeout("tcp", p.IP4Addr(), time.Second*15)
+				conn, err := net.DialTimeout("tcp", p.IP4Addr(), time.Second*5)
 				if err != nil {
 					logger.Error("failed to dial", "error", err)
 					return
@@ -239,34 +148,26 @@ func (tf *TorrentFile) Download(clientID [20]byte, port uint16) error {
 					numBlocksPerPiece,
 				)
 				peer.OnUnchoke = func() {
-					pm.FillPeerQueue(peer)
+					client.FillPeerQueue(peer)
 				}
 				peer.OnChoke = func(pieces []int) {
 					logger.Info("OnChoke ran", "free_pieces", pieces)
 					for _, piece := range pieces {
-						pm.FreePiece(piece)
+						client.FreePiece(piece)
 					}
 				}
+				client.AddPeer(peer)
 
-				pm.AddPeer(peer)
-
-				if err := peer.Open(hs); err != nil {
+				if err := peer.Open(hs, client.Bitfield); err != nil {
+					if err := client.RemovePeer(peer); err != nil {
+						log.Fatal("failed to remove peer:", peer)
+					}
 					logger.Error("[PEER DISCONNECT]", "error: failed to read message", err)
 					return
 				}
 			}()
 		}
 	}()
-
-	// annReq := &tracker.AnnounceRequest{
-	// 	InfoHash: tf.InfoHash,
-	// 	PeerID:   clientID,
-	// 	Port:     port,
-	// 	Left:     tf.TotalLength,
-	// }
-	// if err := tf.DiscoverPeers(peerCh, annReq); err != nil {
-	// 	return err
-	// }
 
 	wg.Wait()
 

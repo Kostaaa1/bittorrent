@@ -56,11 +56,11 @@ type AnnounceRequest struct {
 	InfoHash   [20]byte
 	PeerID     [20]byte
 	Port       uint16
-	Uploaded   int
-	Downloaded int
-	Left       int
-	Compact    int8
-	NoPeerID   int8 // ignored if compact is enabled
+	Uploaded   int64
+	Downloaded int64
+	Left       int64
+	Compact    bool
+	NoPeerID   bool // ignored if compact is enabled
 	// started: The first request to the tracker must include the event key with this value.
 	// stopped: Must be sent to the tracker if the client is shutting down gracefully.
 	// completed: Must be sent to the tracker when the download completes. However, must not be sent if the download was already 100% complete when the client started. Presumably, this is to allow the tracker to increment the "completed downloads" metric based solely on this event.
@@ -73,41 +73,54 @@ type AnnounceRequest struct {
 	// trackerid: Optional. If a previous announce contained a tracker id, it should be set here.
 }
 
-func DiscoverPeers(params AnnounceRequest) ([]PeerAddress, error) {
-	u, err := buildHTTPTrackerURL(params)
-	if err != nil {
-		return nil, err
-	}
-	return requestPeers(u)
+func (req AnnounceRequest) UDPBytes(connID [8]byte) []byte {
+	request := make([]byte, 98)
+
+	binary.Encode(request, binary.BigEndian, connID)
+	binary.BigEndian.PutUint32(request[8:12], 1)
+	binary.Encode(request[16:36], binary.BigEndian, req.InfoHash)
+	binary.Encode(request[36:56], binary.BigEndian, req.PeerID)
+	binary.BigEndian.PutUint64(request[56:64], uint64(req.Downloaded))
+	binary.BigEndian.PutUint64(request[64:72], uint64(req.Left))
+	binary.BigEndian.PutUint64(request[72:80], uint64(req.Uploaded))
+
+	// 0: none; 1: completed; 2: started; 3: stopped
+	binary.BigEndian.PutUint32(request[80:84], uint32(2))
+	binary.BigEndian.PutUint32(request[84:88], uint32(0))
+	binary.BigEndian.PutUint32(request[88:92], uint32(0))
+	binary.BigEndian.PutUint32(request[92:96], uint32(req.NumWant))
+
+	binary.BigEndian.PutUint16(request[96:98], req.Port)
+
+	return request
 }
 
-func buildHTTPTrackerURL(p AnnounceRequest) (string, error) {
-	parsed, err := url.Parse(p.Tracker)
+func BuildHTTPTrackerURL(req AnnounceRequest) (string, error) {
+	parsed, err := url.Parse(req.Tracker)
 	if err != nil {
 		return "", err
 	}
 
 	v := url.Values{
-		"info_hash":  []string{string(p.InfoHash[:])},
-		"peer_id":    []string{string(p.PeerID[:])},
-		"port":       []string{strconv.Itoa(int(p.Port))},
-		"uploaded":   []string{strconv.Itoa(p.Uploaded)},
-		"downloaded": []string{strconv.Itoa(p.Downloaded)},
-		"left":       []string{strconv.Itoa(p.Left)},
+		"info_hash":  []string{string(req.InfoHash[:])},
+		"peer_id":    []string{string(req.PeerID[:])},
+		"port":       []string{strconv.Itoa(int(req.Port))},
+		"uploaded":   []string{strconv.Itoa(int(req.Uploaded))},
+		"downloaded": []string{strconv.Itoa(int(req.Downloaded))},
+		"left":       []string{strconv.Itoa(int(req.Left))},
 		"corrupt":    []string{"0"},
 		// "key": []string{},
-		"event":      []string{"started"},
+		// "event":      []string{"started"},
 		"numwant":    []string{"100"},
 		"compact":    []string{"1"},
 		"no_peer_id": []string{"1"},
 	}
-
 	parsed.RawQuery = v.Encode()
 
 	return parsed.String(), nil
 }
 
-func requestPeers(trackerURL string) ([]PeerAddress, error) {
+func Announce(trackerURL string) (*AnnounceResponse, error) {
 	resp, err := http.Get(trackerURL)
 	if err != nil {
 		return nil, err
@@ -123,8 +136,11 @@ func requestPeers(trackerURL string) ([]PeerAddress, error) {
 		return nil, fmt.Errorf("failed to get the peers from HTTP tracker=%s, error=%s", trackerURL, res.FailureReason)
 	}
 
-	p := res.Peers.List
+	return &res, nil
+}
 
+func ParsePeers(res AnnounceResponse) ([]PeerAddress, error) {
+	p := res.Peers.List
 	if len(res.Peers.Binary) > 0 {
 		v, err := parsePeersBinary(res.Peers.Binary)
 		if err != nil {
@@ -132,7 +148,6 @@ func requestPeers(trackerURL string) ([]PeerAddress, error) {
 		}
 		p = v
 	}
-
 	return p, nil
 }
 
@@ -146,7 +161,6 @@ func parsePeersBinary(peers []byte) ([]PeerAddress, error) {
 	for i := range parsed {
 		b := [6]byte{}
 		copy(b[:], peers[i*6:i*6+6])
-
 		parsed[i] = PeerAddress{
 			IP:   fmt.Sprintf("%d.%d.%d.%d", b[0], b[1], b[2], b[3]),
 			Port: binary.BigEndian.Uint16([]byte{b[4], b[5]}),

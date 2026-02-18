@@ -10,7 +10,7 @@ type pipeline struct {
 }
 
 func newPipeline() *pipeline {
-	windowSize := 16
+	windowSize := 10
 	maxPending := 10
 	return &pipeline{
 		windowSize:      windowSize,

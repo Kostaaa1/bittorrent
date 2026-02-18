@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log/slog"
@@ -23,14 +24,14 @@ func (b Bitfield) SetPiece(index int) {
 	// b[byteIndex] ^= 1 << (7 - offset)
 }
 
-func (peer *Peer) CanRequest() bool {
+func (peer *Peer) canRequest() bool {
 	return peer.amInterested && !peer.peerChoking
 }
 
 func (peer *Peer) Print() {
 	peer.log.Info("[PEER INFO]",
 		"addr", peer.Addr,
-		"can_request", peer.CanRequest(),
+		"can_request", peer.canRequest(),
 	)
 	if peer.pipeline != nil {
 		fmt.Println(
@@ -44,7 +45,7 @@ func (peer *Peer) Print() {
 }
 
 func (peer *Peer) dispatchRequests() {
-	if !peer.CanRequest() {
+	if !peer.canRequest() {
 		return
 	}
 
@@ -182,50 +183,56 @@ func (p *Peer) sendChoke() {
 	p.amChoking = true
 	p.writeMsg(Message{ID: MsgChoke})
 }
-
 func (p *Peer) sendUnchoke() {
 	p.amChoking = false
 	p.writeMsg(Message{ID: MsgUnchoke})
 }
-
 func (p *Peer) sendInterested() {
 	p.amInterested = true
 	p.writeMsg(Message{ID: MsgInterested})
 }
-
 func (p *Peer) sendUninterested() {
 	p.amInterested = false
 	p.writeMsg(Message{ID: MsgUninterested})
 }
-
 func (p *Peer) sendKeepAlive() {
 	p.writeMsg(Message{})
 }
-
-func (p *Peer) sendHave() {
-	// return p.writeMsg(Message{ID: MsgHave, Payload: []byte()})
+func (p *Peer) sendBitfield(bf Bitfield) {
+	fmt.Println("SENDING BITFIELD:", bf)
+	p.writeMsg(Message{ID: MsgBitfield, Payload: bf})
 }
-
+func (p *Peer) SendHave(pieceIndex int) {
+	payload := make([]byte, 4)
+	binary.BigEndian.PutUint32(payload, uint32(pieceIndex))
+	p.writeMsg(Message{ID: MsgHave, Payload: payload})
+}
 func (p *Peer) sendRequest(index, begin, block int) error {
-	p.log.Debug("[REQUEST]",
+	p.log.Debug("[SEND - REQUEST]",
 		"piece", index,
 		"begin", begin,
 		"block", block,
 	)
-	payload := FormatRequest(index, begin, block)
-	return p.writeMsg(Message{ID: MsgRequest, Payload: payload})
+	msg := make([]byte, 12)
+	binary.BigEndian.PutUint32(msg[:4], uint32(index))
+	binary.BigEndian.PutUint32(msg[4:8], uint32(begin))
+	binary.BigEndian.PutUint32(msg[8:12], uint32(block))
+	return p.writeMsg(Message{ID: MsgRequest, Payload: msg})
 }
 
-func (peer *Peer) Close() error {
-	return peer.conn.Close()
+func (peer *Peer) Close() ([]int, error) {
+	err := peer.conn.Close()
+	pieces := peer.pipeline.destroy()
+	return pieces, err
 }
 
-func (p *Peer) Open(hs Handshake) error {
+func (p *Peer) Open(hs Handshake, b Bitfield) error {
 	p.log = slog.With("peer", p.conn.RemoteAddr())
 
 	if err := p.initiateHandshake(hs); err != nil {
 		p.log.Error("[HANDSHAKE]", "status", "failed", "error", err)
-		return p.Close()
+		p.conn.Close()
+		return err
 	}
 
 	p.log.Info("[HANDSHAKE]", "status", "success", "peer", p.conn.RemoteAddr())
@@ -235,6 +242,7 @@ func (p *Peer) Open(hs Handshake) error {
 	}
 
 	p.sendInterested()
+	p.sendBitfield(b)
 
 	ticker := time.NewTicker(p.keepAliveTickInterval)
 	defer ticker.Stop()
@@ -269,6 +277,7 @@ func (p *Peer) Open(hs Handshake) error {
 		case MsgInterested:
 			p.log.Debug("[INTERESTED]")
 			p.peerInterested = true
+			p.sendUnchoke()
 		case MsgUninterested:
 			p.log.Debug("[UNINTERESTED]")
 			p.peerInterested = false
@@ -277,7 +286,6 @@ func (p *Peer) Open(hs Handshake) error {
 			p.bitfield = msg.Payload
 		case MsgRequest:
 			p.log.Debug("[REQUEST]")
-			p.bitfield = msg.Payload
 		case MsgPiece:
 			piece := ParsePieceMessage(msg.Payload)
 			p.writer <- piece
@@ -328,7 +336,3 @@ func (p *Peer) initiateHandshake(hs Handshake) error {
 
 	return nil
 }
-
-// 817efb333db92ec0ef8042a184da8c039bdd1280de5bedfaf69ad1b431a5c72f  /Users/kostaarsic/Downloads/Guha Rehan - Machine Learning Interview Guide - 2025/Guha Rehan - Machine Learning Interview Guide - 2025.pdf
-
-// 67bb4502dbc99b8b44d5637cd6c995040ad3748957f4ea2ef7f5981f0ae44e2b  /Users/kostaarsic/Downloads/Guha Rehan - Machine Learning Interview Guide - 2025/Guha Rehan - Machine Learning Interview Guide - 2025.epub

@@ -69,14 +69,6 @@ func ReadMessage(r io.Reader) (*Message, error) {
 	}, nil
 }
 
-func FormatRequest(index int, begin int, length int) []byte {
-	msg := make([]byte, 12)
-	binary.BigEndian.PutUint32(msg[:4], uint32(index))
-	binary.BigEndian.PutUint32(msg[4:8], uint32(begin))
-	binary.BigEndian.PutUint32(msg[8:12], uint32(length))
-	return msg
-}
-
 type PieceMessage struct {
 	Index int
 	Begin int
