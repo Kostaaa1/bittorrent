@@ -1,7 +1,6 @@
 package client
 
 import (
-	"fmt"
 	"log/slog"
 	"sync"
 	"test/internal/torrent/io"
@@ -14,34 +13,29 @@ type Client struct {
 	// TODO: switch from map to slices
 	assigned   map[int]uint64
 	unassigned map[int]uint64
-	mu         sync.Mutex
 	peers      map[uint64]*peer.Peer
+	mu         sync.Mutex
+	log        *slog.Logger
 }
 
-func (pm *Client) SetPiece(pieceId int) {
-	pm.Bitfield.SetPiece(pieceId)
+func (c *Client) AddPeer(peer *peer.Peer) {
+	c.mu.Lock()
+	c.peers[peer.ID] = peer
+	c.mu.Unlock()
 }
 
-func (pm *Client) AddPeer(peer *peer.Peer) {
-	pm.mu.Lock()
-	pm.peers[peer.ID] = peer
-	pm.mu.Unlock()
-}
-
-func (pm *Client) RemovePeer(peer *peer.Peer) error {
-	free, _ := peer.Close()
-
-	pm.mu.Lock()
-	delete(pm.peers, peer.ID)
-	for _, piece := range free {
-		pm.unassigned[piece] = 0
+func (c *Client) RemovePeer(peer *peer.Peer) {
+	pieces := peer.UnassignPieces()
+	c.mu.Lock()
+	delete(c.peers, peer.ID)
+	for _, piece := range pieces {
+		c.unassigned[piece] = 0
 	}
-	pm.mu.Unlock()
-
-	return nil
+	c.mu.Unlock()
 }
 
-func New(pieces [][20]byte) *Client {
+func New(log *slog.Logger, pieces [][20]byte) *Client {
+	// TODO:
 	unassigned := make(map[int]uint64, len(pieces))
 	for index := range pieces {
 		unassigned[index] = 0
@@ -51,38 +45,35 @@ func New(pieces [][20]byte) *Client {
 		assigned:   make(map[int]uint64),
 		unassigned: unassigned,
 		peers:      make(map[uint64]*peer.Peer, 0),
+		log:        log,
 	}
 }
 
-func (pm *Client) GetAssignedPeer(pieceIndex int) *peer.Peer {
-	pm.mu.Lock()
-	peerID, found := pm.assigned[pieceIndex]
-	pm.mu.Unlock()
-	if !found {
-		return nil
-	}
-	return pm.peers[peerID]
+func (c *Client) FreePiece(pieceIndex int) {
+	c.mu.Lock()
+	delete(c.assigned, pieceIndex)
+	c.unassigned[pieceIndex] = 0
+	c.mu.Unlock()
 }
 
-func (pm *Client) FreePiece(pieceIndex int) {
-	pm.mu.Lock()
-	delete(pm.assigned, pieceIndex)
-	pm.unassigned[pieceIndex] = 0
-	pm.mu.Unlock()
+func (c *Client) assignPiece(peer *peer.Peer, pieceID int) {
+	delete(c.unassigned, pieceID)
+	c.assigned[pieceID] = peer.ID
+	peer.AddPieceToQueue(pieceID)
 }
 
 // TODO: If unnassigned is empty, try to assign the piece from other peer queue
-func (pm *Client) FillPeerQueue(peer *peer.Peer) {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
+func (c *Client) FillPeerQueue(peer *peer.Peer) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// assign piece to peer as long as it can accept
 
 	for peer.CanAssign() {
 		assigned := false
-		for pieceID := range pm.unassigned {
+		for pieceID := range c.unassigned {
 			if peer.HasPiece(pieceID) {
-				delete(pm.unassigned, pieceID)
-				pm.assigned[pieceID] = peer.ID
-				peer.AddPieceToQueue(pieceID)
+				c.assignPiece(peer, pieceID)
 				assigned = true
 				break
 			}
@@ -93,27 +84,55 @@ func (pm *Client) FillPeerQueue(peer *peer.Peer) {
 	}
 }
 
-func (pm *Client) NotifyPeers(pieceIndex int) {
-	pm.mu.Lock()
-	peers := pm.peers
-	pm.mu.Unlock()
-	fmt.Println("Sending have: ", pieceIndex)
-	for _, peer := range peers {
-		peer.SendHave(pieceIndex)
+// func (c *Client) NotifyPeers(pieceIndex int) {
+// 	c.mu.Lock()
+// 	peers := c.peers
+// 	c.mu.Unlock()
+// 	fmt.Println("Sending have: ", pieceIndex)
+// 	for _, peer := range peers {
+// 		if err := peer.SendHave(pieceIndex); err != nil {
+// 			fmt.Printf("failed to send HAVE message to peer: %s - closing and removing\n", peer.Addr)
+// 			c.RemovePeer(peer)
+// 		}
+// 	}
+// }
+
+func (c *Client) GetAssignedPeer(pieceIndex int) *peer.Peer {
+	c.mu.Lock()
+	peerID, found := c.assigned[pieceIndex]
+	c.mu.Unlock()
+	if !found {
+		return nil
 	}
+	return c.peers[peerID]
 }
 
-func (pm *Client) CollectResults(ann *tracker.Announcer, logger *slog.Logger, results <-chan io.Result) {
+func (c *Client) setPiece(pieceID int) {
+	c.Bitfield.SetPiece(pieceID)
+	peer := c.GetAssignedPeer(pieceID)
+	c.FillPeerQueue(peer)
+}
+
+func (c *Client) CollectResults(ann *tracker.Announcer, logger *slog.Logger, results <-chan io.Result) {
 	for result := range results {
 		if result.Err != nil {
-			pm.FreePiece(result.Index)
+			c.log.Debug(
+				"[FAILED TO DOWNLOAD]",
+				"piece_index", result.Index,
+				"erorr", result.Err,
+			)
+			c.FreePiece(result.Index)
 		} else {
+			c.log.Debug(
+				"[DOWNLOAD]",
+				"piece_index", result.Index,
+				"piece_offset", result.Begin,
+				"piece_length", result.LenBlock,
+			)
 			ann.IncDownloaded(uint64(result.LenBlock))
+			c.setPiece(result.Index)
 			// notify all peers that we have a piece
-			pm.NotifyPeers(result.Index)
-			pm.SetPiece(result.Index)
-			peer := pm.GetAssignedPeer(result.Index)
-			pm.FillPeerQueue(peer)
+			// c.NotifyPeers(result.Index)
 		}
 	}
 }

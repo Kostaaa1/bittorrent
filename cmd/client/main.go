@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"log"
-	"math/rand"
 	"os"
 	"test/internal/torrent"
 )

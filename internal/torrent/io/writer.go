@@ -3,7 +3,6 @@ package io
 import (
 	"crypto/sha1"
 	"fmt"
-	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -55,7 +54,6 @@ type PieceWriter struct {
 	worker            chan peer.PieceMessage
 	files             []*FileEntry
 	results           chan Result
-	log               *log.Logger
 }
 
 func NewPieceWriter(
@@ -66,10 +64,7 @@ func NewPieceWriter(
 	numBlocksPerPiece int,
 	blockSize int,
 ) *PieceWriter {
-	f, _ := os.OpenFile("log2.txt", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
-	log := log.New(f, "", log.Ldate|log.Ltime)
 	return &PieceWriter{
-		log:               log,
 		worker:            make(chan peer.PieceMessage),
 		results:           make(chan Result),
 		pieces:            make(map[int]*PieceBuffer),
@@ -129,7 +124,6 @@ func (pw *PieceWriter) Start() error {
 				Begin:    msg.Begin,
 				LenBlock: len(msg.Block),
 			}
-
 			if !piece.verify() {
 				result.Err = fmt.Errorf("hashes do not match for piece %d", msg.Index)
 			} else if _, err := pw.writePiece(msg.Index, piece.buffer); err != nil {
@@ -185,16 +179,6 @@ func (w *PieceWriter) setEntryFile(entry *FileEntry) error {
 	return nil
 }
 
-func (w *PieceWriter) writeAt(entry *FileEntry, pieceIndex int, piece []byte, offset int64) int {
-	w.log.Printf("[PIECE DOWNLOAD] - file=%s, piece_index=%d, piece_size=%d, offset=%d\n", entry.file.Name(), pieceIndex, len(piece), offset)
-
-	n, err := entry.file.WriteAt(piece, offset)
-	if err != nil {
-		log.Fatal("failed to writeAt", entry.FullPath, err)
-	}
-	return n
-}
-
 func (w *PieceWriter) writePiece(pieceIndex int, piece []byte) (int, error) {
 	entry, fileID, err := w.getFileEntry(pieceIndex)
 	if err != nil {
@@ -215,12 +199,9 @@ func (w *PieceWriter) writePiece(pieceIndex int, piece []byte) (int, error) {
 		remainder := piece[diff:]
 		remainderLen := len(remainder)
 
-		// _, err := entry.file.WriteAt(start, int64(entryOffset))
-		// if err != nil {
-		// 	log.Fatal("failed to writeAt", entry.FullPath, err)
-		// }
-
-		w.writeAt(entry, pieceIndex, start, int64(entryOffset))
+		if _, err := entry.file.WriteAt(start, int64(entryOffset)); err != nil {
+			return 0, err
+		}
 
 		for remainderLen > 0 {
 			fileID++
@@ -230,24 +211,15 @@ func (w *PieceWriter) writePiece(pieceIndex int, piece []byte) (int, error) {
 				return 0, err
 			}
 
-			// remainderN, err := entry.file.WriteAt(remainder, 0)
-			// if err != nil {
-			// 	log.Fatal("failed to writeAt", entry.FullPath, err)
-			// }
-
-			remainderN := w.writeAt(entry, pieceIndex, remainder, 0)
+			remainderN, err := entry.file.WriteAt(remainder, 0)
+			if err != nil {
+				return 0, err
+			}
 			remainderLen -= remainderN
 		}
 
 		return len(piece), nil
 	}
 
-	// n, err := entry.file.WriteAt(piece, int64(entryOffset))
-	// if err != nil {
-	// 	return 0, err
-	// }
-
-	n := w.writeAt(entry, pieceIndex, piece, int64(entryOffset))
-
-	return n, nil
+	return entry.file.WriteAt(piece, int64(entryOffset))
 }

@@ -137,8 +137,6 @@ func (announcer *Announcer) Run(ctx context.Context) {
 }
 
 func (ann *Announcer) run(tracker string) (uint32, error) {
-	fmt.Println("SENDING ANNOUNCE REQUEST", tracker)
-
 	annReq := AnnounceRequest{
 		Tracker:    tracker,
 		InfoHash:   ann.infoHash,

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
-	"log"
 	"log/slog"
 	"math"
 	"net"
@@ -20,15 +19,14 @@ import (
 )
 
 type TorrentFile struct {
-	TotalLength int
-	PieceLength int
-	Announce    string
-	UrlList     []string
-	Files       []*io.FileEntry
-	Name        string
-	Pieces      [][20]byte
-	InfoHash    [20]byte
-
+	TotalLength  int
+	PieceLength  int
+	Announce     string
+	UrlList      []string
+	Files        []*io.FileEntry
+	Name         string
+	Pieces       [][20]byte
+	InfoHash     [20]byte
 	AnnounceList [][]string
 	Comment      string
 	CreatedBy    string
@@ -64,14 +62,12 @@ func newLogger() *slog.Logger {
 			return a
 		},
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, opts))
+	logger := slog.New(slog.NewTextHandler(os.Stdout, opts))
 	slog.SetDefault(logger)
 	return logger
 }
 
 func (tf *TorrentFile) Download(ctx context.Context, clientID [20]byte, port uint16) error {
-	peerCh := make(chan tracker.PeerAddress)
-
 	hs := peer.Handshake{
 		Pstr:      []byte("BitTorrent protocol"),
 		Reserverd: [8]byte{},
@@ -91,10 +87,12 @@ func (tf *TorrentFile) Download(ctx context.Context, clientID [20]byte, port uin
 		blockSize,
 	)
 
-	writerC, resultC := writer.Channles()
-	client := client.New(tf.Pieces)
-	var peerCounter uint64 = 0
 	logger := newLogger()
+	writerC, resultC := writer.Channles()
+	client := client.New(logger, tf.Pieces)
+	var peerCounter uint64 = 0
+	// TODO: make it buffered?
+	peerCh := make(chan tracker.PeerAddress)
 
 	announcer := tracker.NewAnnouncer(
 		tf.InfoHash,
@@ -111,14 +109,6 @@ func (tf *TorrentFile) Download(ctx context.Context, clientID [20]byte, port uin
 	go writer.Start()
 	go client.CollectResults(announcer, logger, resultC)
 
-	// sem := make(chan struct{}, 30)
-	// tick := time.NewTicker(time.Second)
-	// go func() {
-	// 	for range tick.C {
-	// 		<-sem
-	// 	}
-	// }()
-
 	var wg sync.WaitGroup
 
 	wg.Add(1)
@@ -128,18 +118,15 @@ func (tf *TorrentFile) Download(ctx context.Context, clientID [20]byte, port uin
 
 		for p := range peerCh {
 			go func() {
-				// sem <- struct{}{}
-				// defer func() { <-sem }()
-
 				conn, err := net.DialTimeout("tcp", p.IP4Addr(), time.Second*5)
 				if err != nil {
 					logger.Error("failed to dial", "error", err)
 					return
 				}
 
-				id := atomic.AddUint64(&peerCounter, 1) - 1
+				peerID := atomic.AddUint64(&peerCounter, 1) - 1
 
-				peer := peer.New(id, conn, writerC, logger)
+				peer := peer.New(peerID, conn, writerC, logger)
 				peer.SetInfo(
 					len(tf.Pieces),
 					tf.TotalLength,
@@ -156,13 +143,12 @@ func (tf *TorrentFile) Download(ctx context.Context, clientID [20]byte, port uin
 						client.FreePiece(piece)
 					}
 				}
-				client.AddPeer(peer)
-
-				if err := peer.Open(hs, client.Bitfield); err != nil {
-					if err := client.RemovePeer(peer); err != nil {
-						log.Fatal("failed to remove peer:", peer)
-					}
+				peer.OnHandshake = func() {
+					client.AddPeer(peer)
+				}
+				if err := peer.Open(ctx, hs, client.Bitfield); err != nil {
 					logger.Error("[PEER DISCONNECT]", "error: failed to read message", err)
+					client.RemovePeer(peer)
 					return
 				}
 			}()

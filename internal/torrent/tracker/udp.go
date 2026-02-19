@@ -3,7 +3,6 @@ package tracker
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
 	"math/rand/v2"
 	"net"
@@ -45,22 +44,26 @@ func DialUDPTracker(trackerURL string) (*udpTracker, error) {
 	return &udpTracker{conn}, nil
 }
 
-func (u *udpTracker) Connect() (uint64, error) {
+func (u *udpTracker) sendConnect(txID uint32) error {
 	const protocolID = 0x41727101980
 	connectMsg := make([]byte, 16)
 	magicConstant := uint64(protocolID)
 	binary.BigEndian.PutUint64(connectMsg[:8], magicConstant)           // protocol_id
 	binary.BigEndian.PutUint32(connectMsg[8:12], uint32(ActionConnect)) // action 0
-	txID := rand.Uint32()
-	binary.BigEndian.PutUint32(connectMsg[12:16], txID) // transaction id
+	binary.BigEndian.PutUint32(connectMsg[12:16], txID)                 // transaction id
 
 	_, err := u.conn.Write(connectMsg)
 	if err != nil {
-		return 0, err
+		return err
 	}
 
+	return nil
+}
+
+func (u *udpTracker) readConnect(txID uint32) (uint64, error) {
 	connResp := make([]byte, 16)
-	_, err = io.ReadFull(u.conn, connResp)
+
+	_, err := io.ReadFull(u.conn, connResp)
 	if err != nil {
 		return 0, err
 	}
@@ -76,6 +79,14 @@ func (u *udpTracker) Connect() (uint64, error) {
 	}
 
 	return binary.BigEndian.Uint64(connResp[8:16]), nil
+}
+
+func (u *udpTracker) Connect() (uint64, error) {
+	txID := rand.Uint32()
+	if err := u.sendConnect(txID); err != nil {
+		return 0, err
+	}
+	return u.readConnect(txID)
 }
 
 func (u *udpTracker) Announce(connID uint64, req AnnounceRequest) (uint32, []PeerAddress, error) {
@@ -125,7 +136,6 @@ func (u *udpTracker) Announce(connID uint64, req AnnounceRequest) (uint32, []Pee
 
 func (req AnnounceRequest) udpBytes(connID uint64) (uint32, []byte) {
 	txID := rand.Uint32()
-
 	request := make([]byte, 98)
 	binary.BigEndian.PutUint64(request[:8], connID)
 	binary.BigEndian.PutUint32(request[8:12], uint32(ActionAnnounce)) // action
@@ -140,6 +150,5 @@ func (req AnnounceRequest) udpBytes(connID uint64) (uint32, []byte) {
 	binary.BigEndian.PutUint32(request[88:92], uint32(0))             // key -
 	binary.BigEndian.PutUint32(request[92:96], uint32(req.NumWant))   // default -1
 	binary.BigEndian.PutUint16(request[96:98], req.Port)              // uint16
-	fmt.Println("REQUEST:", request)
 	return txID, request
 }

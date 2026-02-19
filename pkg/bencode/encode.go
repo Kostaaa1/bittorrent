@@ -174,7 +174,5 @@ func (e *encoder) encode(v any) error {
 		return e.writeMap(structToMap(value))
 	}
 
-	fmt.Println(value, value.Kind(), value.Type(), value.IsNil(), value.Elem())
-
 	return ErrUnsupportedEncodeType
 }

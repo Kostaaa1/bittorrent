@@ -15,9 +15,9 @@ func newPipeline() *pipeline {
 	return &pipeline{
 		windowSize:      windowSize,
 		maxPendingLimit: maxPending,
+		pieces:          make(chan int, maxPending),
 		inflight:        0,
 		nextBlock:       0,
-		pieces:          make(chan int, maxPending),
 		curr:            nil,
 	}
 }
@@ -27,21 +27,17 @@ func (p *pipeline) addQueue(piece int) {
 }
 
 func (p *pipeline) canAssign() bool {
-	l := len(p.pieces)
-	return l < p.maxPendingLimit
+	return len(p.pieces) < p.maxPendingLimit
 }
 
-func (p *pipeline) destroy() []int {
+func (p *pipeline) drain() []int {
 	left := make([]int, 0)
 	if p == nil {
 		return left
 	}
-
 	for piece := range p.pieces {
 		left = append(left, piece)
 	}
-	p = nil
-
 	return left
 }
 
