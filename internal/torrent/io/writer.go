@@ -3,6 +3,7 @@ package io
 import (
 	"crypto/sha1"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -54,6 +55,7 @@ type PieceWriter struct {
 	worker            chan peer.PieceMessage
 	files             []*FileEntry
 	results           chan Result
+	log               *log.Logger
 }
 
 func NewPieceWriter(
@@ -64,6 +66,8 @@ func NewPieceWriter(
 	numBlocksPerPiece int,
 	blockSize int,
 ) *PieceWriter {
+	f, _ := os.OpenFile("log.txt", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	log := log.New(f, "", log.Ltime)
 	return &PieceWriter{
 		worker:            make(chan peer.PieceMessage),
 		results:           make(chan Result),
@@ -75,6 +79,7 @@ func NewPieceWriter(
 		numBlocksPerPiece: numBlocksPerPiece,
 		numOfPieces:       len(pieces),
 		totalLength:       totalLength,
+		log:               log,
 	}
 }
 
@@ -199,6 +204,8 @@ func (w *PieceWriter) writePiece(pieceIndex int, piece []byte) (int, error) {
 		remainder := piece[diff:]
 		remainderLen := len(remainder)
 
+		w.log.Println("[DOWNLOADED PIECE]", "piece_index=", pieceIndex, len(piece))
+
 		if _, err := entry.file.WriteAt(start, int64(entryOffset)); err != nil {
 			return 0, err
 		}
@@ -220,6 +227,8 @@ func (w *PieceWriter) writePiece(pieceIndex int, piece []byte) (int, error) {
 
 		return len(piece), nil
 	}
+
+	w.log.Println("[DOWNLOADED PIECE]", "piece_index=", pieceIndex, len(piece))
 
 	return entry.file.WriteAt(piece, int64(entryOffset))
 }

@@ -43,58 +43,53 @@ func (peer *Peer) dispatchRequests() {
 		peer.pipeline.inflight--
 	}
 
-	if peer.pipeline.curr == nil {
-		if assigned := peer.pipeline.assignNext(); !assigned {
-			peer.log.Info("DID NOT ASSIGN NEXT PIECE TO PEER")
-			return
-		}
-	}
-
 	for peer.pipeline.inflight < peer.pipeline.windowSize {
-		if peer.pipeline.curr == nil {
-			peer.log.Info("PEER HAS NO CURRENT")
+		index, ok := peer.pipeline.getActiveOrAssignNext()
+		if !ok {
+			fmt.Println("failed to get current or assign next")
 			return
 		}
 
-		index := *peer.pipeline.curr
-		begin := peer.pipeline.nextBlock * peer.info.blockSize
-		blockLen := peer.info.blockSize
+		fmt.Println("index", index)
 
-		lastPieceID := peer.info.numOfPieces - 1
-		blocks := peer.info.numBlocksPerPiece
+		block := peer.info.blockSize
+		numOfPieces := peer.info.numOfPieces
 
-		if index == lastPieceID {
-			tl := peer.info.totalLength
-			pl := peer.info.pieceLength
-			bs := peer.info.blockSize
+		lastPieceID := numOfPieces - 1
+		// index := curr
+		last := index == lastPieceID
+		blocksForPiece := peer.info.numBlocksPerPiece
 
-			size := tl - (lastPieceID * pl)
-			remaining := size - begin
-
-			if remaining < 0 {
-				panic("TODO: REMAINING IS LESS THEN 0")
-				if assigned := peer.pipeline.assignNext(); !assigned {
-					return
-				}
-				continue
-			}
-
-			if remaining < blockLen {
-				blockLen = remaining
-			}
-
-			blocks = int(math.Ceil(float64(size) / float64(bs)))
+		if last {
+			size := peer.info.totalLength - (lastPieceID * peer.info.pieceLength)
+			blocksForPiece = int(math.Ceil(float64(size) / float64(block)))
 		}
 
-		peer.sendRequest(index, begin, blockLen)
-		peer.pipeline.inflight++
-		peer.pipeline.nextBlock++
-
-		if peer.pipeline.nextBlock >= blocks {
-			if assigned := peer.pipeline.assignNext(); !assigned {
+		if peer.pipeline.nextBlock >= blocksForPiece {
+			index, ok = peer.pipeline.assignNext()
+			if !ok {
+				fmt.Println("failed to get current or assign next")
 				return
 			}
+			fmt.Println("REASSINGED, NEW INDEX", index)
 		}
+
+		begin := peer.pipeline.nextBlock * block
+
+		if last {
+			size := peer.info.totalLength - (lastPieceID * peer.info.pieceLength)
+			remaining := size - begin
+			if remaining < 0 {
+				panic("TODO: REMAINING IS LESS THEN 0")
+			}
+			if remaining < block {
+				block = remaining
+			}
+		}
+
+		peer.sendRequest(index, begin, block)
+		peer.pipeline.inflight++
+		peer.pipeline.nextBlock++
 	}
 }
 
@@ -150,7 +145,12 @@ func (peer *Peer) CanAssign() bool {
 	return peer.pipeline.canAssign()
 }
 
-func New(id uint64, conn net.Conn, w chan<- PieceMessage, log *slog.Logger) *Peer {
+func New(
+	id uint64,
+	conn net.Conn,
+	w chan<- PieceMessage,
+	log *slog.Logger,
+) *Peer {
 	return &Peer{
 		ID:           id,
 		Addr:         conn.RemoteAddr().String(),
@@ -171,7 +171,7 @@ func (p *Peer) HasPiece(pieceIndex int) bool {
 
 func (peer *Peer) AddPieceToQueue(pieceID int) {
 	peer.log.Debug("[ASSIGN]", "piece", pieceID, "peer", peer.conn.RemoteAddr())
-	peer.pipeline.addQueue(pieceID)
+	peer.pipeline.addPiece(pieceID)
 }
 
 func (p *Peer) writeMsg(msg Message) error {
@@ -223,8 +223,8 @@ func (p *Peer) sendRequest(index, begin, block int) error {
 	return p.writeMsg(Message{ID: MsgRequest, Payload: msg})
 }
 
-func (peer *Peer) UnassignPieces() []int {
-	return peer.pipeline.drain()
+func (peer *Peer) AssignedPieces() []int {
+	return peer.pipeline.assignedPieces()
 }
 
 func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
@@ -276,9 +276,9 @@ func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 		case MsgChoke:
 			p.log.Debug("[CHOKE]")
 			p.peerChoking = true
-			toReassign := p.pipeline.drain()
+			pieces := p.pipeline.assignedPieces()
+			p.OnChoke(pieces)
 			p.pipeline = nil
-			p.OnChoke(toReassign)
 		case MsgUnchoke:
 			p.log.Debug("[UNCHOKE]")
 			p.peerChoking = false
@@ -299,13 +299,23 @@ func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 			p.log.Debug("[REQUEST]")
 		case MsgPiece:
 			piece := ParsePieceMessage(msg.Payload)
-			p.writer <- piece
 			p.log.Debug(
 				"[PIECE]",
 				"piece", piece.Index,
 				"begin", piece.Begin,
 				"len", len(piece.Block),
 			)
+			p.writer <- piece
+
+			p.pipeline.donePiece(piece.Index)
+
+			// if *p.pipeline.curr != piece.Index {
+			// p.pipeline.removePiece(piece.Index)
+			// if _, ok := p.pipeline.assignNext(); !ok {
+			// 	panic("failed to assign new piece from READ MESSAGE")
+			// }
+			// }
+
 			p.dispatchRequests()
 		case MsgHave:
 			p.log.Debug("[REQUEST]")
@@ -323,10 +333,11 @@ func (p *Peer) Print() {
 			"[PEER]",
 			"addr", p.Addr,
 			"id", p.ID,
-			"pipeline.inflight", p.pipeline.inflight,
-			"pipeline.curr", p.pipeline.curr,
-			"pipeline.len_assigned_pieces", len(p.pipeline.pieces),
-			"pipeline.assigned_pieces", p.pipeline.pieces,
+			"pipeline", p.pipeline,
+			// "pipeline.inflight", p.pipeline.inflight,
+			// "pipeline.curr", p.pipeline.curr,
+			// "pipeline.len_assigned_pieces", len(p.pipeline.pieces),
+			// "pipeline.assigned_pieces", p.pipeline.pieces,
 		)
 	} else {
 		p.log.Info(

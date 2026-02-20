@@ -27,7 +27,7 @@ func (c *Client) AddPeer(peer *peer.Peer) {
 }
 
 func (c *Client) RemovePeer(peer *peer.Peer) {
-	pieces := peer.UnassignPieces()
+	pieces := peer.AssignedPieces()
 	c.mu.Lock()
 	delete(c.peers, peer.ID)
 	for _, piece := range pieces {
