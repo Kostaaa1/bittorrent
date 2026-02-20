@@ -1,5 +1,7 @@
 package peer
 
+// TODO:
+// if slow peer has dispatched requests, and peer does not send the pieces for those requests, there is no way of getting dispatched pieces back (they need to be reassigned). change data structure for pieces to []int.
 type pipeline struct {
 	windowSize      int
 	inflight        int

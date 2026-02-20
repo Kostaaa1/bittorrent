@@ -1,11 +1,13 @@
 package client
 
 import (
+	"fmt"
 	"log/slog"
 	"sync"
 	"test/internal/torrent/io"
 	"test/internal/torrent/peer"
 	"test/internal/torrent/tracker"
+	"time"
 )
 
 type Client struct {
@@ -32,6 +34,19 @@ func (c *Client) RemovePeer(peer *peer.Peer) {
 		c.unassigned[piece] = 0
 	}
 	c.mu.Unlock()
+}
+
+func (c *Client) Debugger() {
+	tick := time.NewTicker(time.Second * 15)
+	for range tick.C {
+		c.mu.Lock()
+		peers := c.peers
+		c.mu.Unlock()
+		fmt.Println("ACTIVE PEERS:", peers)
+		for _, p := range peers {
+			p.Print()
+		}
+	}
 }
 
 func New(log *slog.Logger, pieces [][20]byte) *Client {

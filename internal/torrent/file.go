@@ -91,7 +91,6 @@ func (tf *TorrentFile) Download(ctx context.Context, clientID [20]byte, port uin
 	writerC, resultC := writer.Channles()
 	client := client.New(logger, tf.Pieces)
 	var peerCounter uint64 = 0
-	// TODO: make it buffered?
 	peerCh := make(chan tracker.PeerAddress)
 
 	announcer := tracker.NewAnnouncer(
@@ -105,6 +104,7 @@ func (tf *TorrentFile) Download(ctx context.Context, clientID [20]byte, port uin
 		true,
 	)
 
+	go client.Debugger()
 	go announcer.Run(ctx)
 	go writer.Start()
 	go client.CollectResults(announcer, logger, resultC)

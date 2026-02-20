@@ -31,8 +31,16 @@ func (peer *Peer) canRequest() bool {
 }
 
 func (peer *Peer) dispatchRequests() {
+	if peer.pipeline == nil {
+		return
+	}
+
 	if !peer.canRequest() {
 		return
+	}
+
+	if peer.pipeline.inflight > 0 {
+		peer.pipeline.inflight--
 	}
 
 	if peer.pipeline.curr == nil {
@@ -298,10 +306,7 @@ func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 				"begin", piece.Begin,
 				"len", len(piece.Block),
 			)
-			if p.pipeline != nil && p.pipeline.inflight > 0 {
-				p.pipeline.inflight--
-				p.dispatchRequests()
-			}
+			p.dispatchRequests()
 		case MsgHave:
 			p.log.Debug("[REQUEST]")
 		case MsgCancel:
@@ -309,6 +314,26 @@ func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 		case MsgPort:
 			p.log.Debug("[PORT]")
 		}
+	}
+}
+
+func (p *Peer) Print() {
+	if p.pipeline != nil {
+		p.log.Info(
+			"[PEER]",
+			"addr", p.Addr,
+			"id", p.ID,
+			"pipeline.inflight", p.pipeline.inflight,
+			"pipeline.curr", p.pipeline.curr,
+			"pipeline.len_assigned_pieces", len(p.pipeline.pieces),
+			"pipeline.assigned_pieces", p.pipeline.pieces,
+		)
+	} else {
+		p.log.Info(
+			"[PEER]",
+			"addr", p.Addr,
+			"id", p.ID,
+		)
 	}
 }
 

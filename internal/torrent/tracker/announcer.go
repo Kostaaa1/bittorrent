@@ -65,14 +65,11 @@ func (ann *Announcer) IncUploaded(n uint64) {
 
 // if single mode find first tracker that responds with peers and use it for announcing - spawn single goroutine
 // if multi mode, send request to all trackers, if they respond, spawn goroutine and announce it periodically
+// maybe use goroutines to fetch peers, fetch in batches
 func (announcer *Announcer) Run(ctx context.Context) {
 	if len(announcer.announceList) > 0 {
 		for _, tier := range announcer.announceList {
 			for _, announce := range tier {
-				if strings.HasPrefix(announce, "http") {
-					continue
-				}
-
 				interval, err := announcer.run(announce)
 				if err != nil {
 					fmt.Println("failed to get ther response for announce announce:", announce, err)
