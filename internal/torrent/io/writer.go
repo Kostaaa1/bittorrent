@@ -87,11 +87,11 @@ func (pw *PieceWriter) Channles() (chan peer.PieceMessage, <-chan Result) {
 	return pw.worker, pw.results
 }
 
-func (pw *PieceWriter) getPieceSize(pieceIndex int) (int, int) {
+func (pw *PieceWriter) getPieceSize(pieceID int) (int, int) {
 	size := pw.pieceLength
 	blocks := pw.numBlocksPerPiece
 	lastPiece := pw.numOfPieces - 1
-	if pieceIndex == lastPiece {
+	if pieceID == lastPiece {
 		size = pw.totalLength - (lastPiece * pw.pieceLength)
 		blocks = int(math.Ceil(float64(size) / float64(pw.blockSize)))
 	}
@@ -131,10 +131,19 @@ func (pw *PieceWriter) Start() error {
 			}
 			if !piece.verify() {
 				result.Err = fmt.Errorf("hashes do not match for piece %d", msg.Index)
+
+				fmt.Println("TARGET:", msg.Index, piece.index)
+				fmt.Println("Block:", sha1.Sum(msg.Block))
+				fmt.Println("Buffer:", sha1.Sum(piece.buffer))
+				fmt.Println("Match hash piece:", piece.hash)
+				// for _, hash := range pw.hashPieces {
+				// 	fmt.Println(hash)
+				// }
 			} else if _, err := pw.writePiece(msg.Index, piece.buffer); err != nil {
 				result.Err = err
 			}
 
+			delete(pw.pieces, piece.index)
 			pw.results <- result
 		}
 	}
@@ -142,8 +151,8 @@ func (pw *PieceWriter) Start() error {
 	return nil
 }
 
-func (w *PieceWriter) getFileEntry(pieceIndex int) (entry *FileEntry, id int, err error) {
-	offset := pieceIndex * w.pieceLength
+func (w *PieceWriter) getFileEntry(pieceID int) (entry *FileEntry, id int, err error) {
+	offset := pieceID * w.pieceLength
 	for i, f := range w.files {
 		if offset <= f.EndOffset {
 			id = i
@@ -151,7 +160,7 @@ func (w *PieceWriter) getFileEntry(pieceIndex int) (entry *FileEntry, id int, er
 			return
 		}
 	}
-	err = fmt.Errorf("failed to find the file for piece index: %d", pieceIndex)
+	err = fmt.Errorf("failed to find the file for piece index: %d", pieceID)
 	return
 }
 
@@ -184,8 +193,8 @@ func (w *PieceWriter) setEntryFile(entry *FileEntry) error {
 	return nil
 }
 
-func (w *PieceWriter) writePiece(pieceIndex int, piece []byte) (int, error) {
-	entry, fileID, err := w.getFileEntry(pieceIndex)
+func (w *PieceWriter) writePiece(pieceID int, piece []byte) (int, error) {
+	entry, fileID, err := w.getFileEntry(pieceID)
 	if err != nil {
 		return 0, err
 	}
@@ -194,17 +203,16 @@ func (w *PieceWriter) writePiece(pieceIndex int, piece []byte) (int, error) {
 		return 0, err
 	}
 
-	pieceOffset := pieceIndex * w.pieceLength
+	pieceOffset := pieceID * w.pieceLength
 	entryOffset := pieceOffset - entry.StartOffset
 
 	if entryOffset+len(piece) > entry.Length {
 		diff := entry.Length - entryOffset
 		start := piece[:diff]
-
 		remainder := piece[diff:]
 		remainderLen := len(remainder)
 
-		w.log.Println("[DOWNLOADED PIECE]", "piece_index=", pieceIndex, len(piece))
+		w.log.Println("[DOWNLOADED PIECE]", "piece_index=", pieceID, len(piece))
 
 		if _, err := entry.file.WriteAt(start, int64(entryOffset)); err != nil {
 			return 0, err
@@ -228,7 +236,7 @@ func (w *PieceWriter) writePiece(pieceIndex int, piece []byte) (int, error) {
 		return len(piece), nil
 	}
 
-	w.log.Println("[DOWNLOADED PIECE]", "piece_index=", pieceIndex, len(piece))
+	w.log.Println("[DOWNLOADED PIECE]", "piece_index=", pieceID, len(piece))
 
 	return entry.file.WriteAt(piece, int64(entryOffset))
 }

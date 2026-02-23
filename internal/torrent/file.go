@@ -68,6 +68,8 @@ func newLogger() *slog.Logger {
 }
 
 func (tf *TorrentFile) Download(ctx context.Context, clientID [20]byte, port uint16) error {
+	fmt.Println("LENGTH OF PIECES:", len(tf.Pieces))
+
 	hs := peer.Handshake{
 		Pstr:      []byte("BitTorrent protocol"),
 		Reserverd: [8]byte{},
@@ -89,7 +91,7 @@ func (tf *TorrentFile) Download(ctx context.Context, clientID [20]byte, port uin
 
 	logger := newLogger()
 	writerC, resultC := writer.Channles()
-	client := client.New(logger, tf.Pieces)
+	client := client.New(tf.Pieces, logger)
 	var peerCounter uint64 = 0
 	peerCh := make(chan tracker.PeerAddress)
 
@@ -104,20 +106,23 @@ func (tf *TorrentFile) Download(ctx context.Context, clientID [20]byte, port uin
 		true,
 	)
 
-	go client.Debugger()
 	go announcer.Run(ctx)
 	go writer.Start()
-	go client.CollectResults(announcer, logger, resultC)
+	go client.CollectResults(announcer, resultC)
+
+	// maxConnectedPeers := 0
+	// peerSem := make(chan struct{}, maxConnectedPeers)
 
 	var wg sync.WaitGroup
-
 	wg.Add(1)
 
 	go func() {
 		defer wg.Done()
-
 		for p := range peerCh {
 			go func() {
+				// peerSem <- struct{}{}
+				// defer func() { <-peerSem }()
+
 				conn, err := net.DialTimeout("tcp", p.IP4Addr(), time.Second*5)
 				if err != nil {
 					logger.Error("failed to dial", "error", err)

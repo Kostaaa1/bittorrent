@@ -25,6 +25,33 @@ type Message struct {
 	Payload []byte
 }
 
+func (msg Message) String() string {
+	switch msg.ID {
+	case MsgChoke:
+		return "[CHOKE]"
+	case MsgUnchoke:
+		return "[UNCHOKE]"
+	case MsgInterested:
+		return "[INTERESTED]"
+	case MsgUninterested:
+		return "[UNINTERESTED]"
+	case MsgHave:
+		return "[HAVE]"
+	case MsgBitfield:
+		return "[BITFIELD]"
+	case MsgRequest:
+		return "[REQUEST]"
+	case MsgPiece:
+		return "[PIECE]"
+	case MsgCancel:
+		return "[CANCEL]"
+	case MsgPort:
+		return "[PORT]"
+	default:
+		return "invalid"
+	}
+}
+
 func (msg *Message) Bytes() []byte {
 	if msg == nil {
 		return make([]byte, 4)

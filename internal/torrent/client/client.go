@@ -11,13 +11,13 @@ import (
 )
 
 type Client struct {
-	Bitfield peer.Bitfield
-	// TODO: switch from map to slices
-	assigned   map[int]uint64
-	unassigned map[int]uint64
-	peers      map[uint64]*peer.Peer
-	mu         sync.Mutex
-	log        *slog.Logger
+	Bitfield     peer.Bitfield
+	assigned     map[int]uint64
+	unassigned   map[int]struct{}
+	peers        map[uint64]*peer.Peer
+	mu           sync.Mutex
+	log          *slog.Logger
+	maxPeerLimit int
 }
 
 func (c *Client) AddPeer(peer *peer.Peer) {
@@ -31,29 +31,28 @@ func (c *Client) RemovePeer(peer *peer.Peer) {
 	c.mu.Lock()
 	delete(c.peers, peer.ID)
 	for _, piece := range pieces {
-		c.unassigned[piece] = 0
+		c.unassigned[piece] = struct{}{}
 	}
 	c.mu.Unlock()
 }
 
-func (c *Client) Debugger() {
-	tick := time.NewTicker(time.Second * 15)
+func (c *Client) PrintPeers() {
+	tick := time.NewTicker(time.Second * 30)
 	for range tick.C {
 		c.mu.Lock()
 		peers := c.peers
 		c.mu.Unlock()
-		fmt.Println("ACTIVE PEERS:", peers)
+		fmt.Println("ACTIVE PEERS:", len(peers))
 		for _, p := range peers {
 			p.Print()
 		}
 	}
 }
 
-func New(log *slog.Logger, pieces [][20]byte) *Client {
-	// TODO:
-	unassigned := make(map[int]uint64, len(pieces))
+func New(pieces [][20]byte, log *slog.Logger) *Client {
+	unassigned := make(map[int]struct{}, len(pieces))
 	for index := range pieces {
-		unassigned[index] = 0
+		unassigned[index] = struct{}{}
 	}
 	return &Client{
 		Bitfield:   make([]byte, (len(pieces)+7)/8),
@@ -64,10 +63,10 @@ func New(log *slog.Logger, pieces [][20]byte) *Client {
 	}
 }
 
-func (c *Client) FreePiece(pieceIndex int) {
+func (c *Client) FreePiece(pieceID int) {
 	c.mu.Lock()
-	delete(c.assigned, pieceIndex)
-	c.unassigned[pieceIndex] = 0
+	delete(c.assigned, pieceID)
+	c.unassigned[pieceID] = struct{}{}
 	c.mu.Unlock()
 }
 
@@ -81,8 +80,6 @@ func (c *Client) assignPiece(peer *peer.Peer, pieceID int) {
 func (c *Client) FillPeerQueue(peer *peer.Peer) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	// assign piece to peer as long as it can accept
 
 	for peer.CanAssign() {
 		assigned := false
@@ -99,36 +96,7 @@ func (c *Client) FillPeerQueue(peer *peer.Peer) {
 	}
 }
 
-// func (c *Client) NotifyPeers(pieceIndex int) {
-// 	c.mu.Lock()
-// 	peers := c.peers
-// 	c.mu.Unlock()
-// 	fmt.Println("Sending have: ", pieceIndex)
-// 	for _, peer := range peers {
-// 		if err := peer.SendHave(pieceIndex); err != nil {
-// 			fmt.Printf("failed to send HAVE message to peer: %s - closing and removing\n", peer.Addr)
-// 			c.RemovePeer(peer)
-// 		}
-// 	}
-// }
-
-func (c *Client) GetAssignedPeer(pieceIndex int) *peer.Peer {
-	c.mu.Lock()
-	peerID, found := c.assigned[pieceIndex]
-	c.mu.Unlock()
-	if !found {
-		return nil
-	}
-	return c.peers[peerID]
-}
-
-func (c *Client) setPiece(pieceID int) {
-	c.Bitfield.SetPiece(pieceID)
-	peer := c.GetAssignedPeer(pieceID)
-	c.FillPeerQueue(peer)
-}
-
-func (c *Client) CollectResults(ann *tracker.Announcer, logger *slog.Logger, results <-chan io.Result) {
+func (c *Client) CollectResults(ann *tracker.Announcer, results <-chan io.Result) {
 	for result := range results {
 		if result.Err != nil {
 			c.log.Debug(
@@ -138,6 +106,11 @@ func (c *Client) CollectResults(ann *tracker.Announcer, logger *slog.Logger, res
 			)
 			c.FreePiece(result.Index)
 		} else {
+			// increment the number of downloaded
+			// update bitfield
+			// notify/send have message to all peers that we have a piece
+			// remove it from assigned
+
 			c.log.Debug(
 				"[DOWNLOAD]",
 				"piece_index", result.Index,
@@ -145,9 +118,44 @@ func (c *Client) CollectResults(ann *tracker.Announcer, logger *slog.Logger, res
 				"piece_length", result.LenBlock,
 			)
 			ann.IncDownloaded(uint64(result.LenBlock))
-			c.setPiece(result.Index)
+
+			pieceID := result.Index
+			c.Bitfield.SetPiece(pieceID)
+
+			c.mu.Lock()
+			peer := c.peers[c.assigned[pieceID]]
+			c.mu.Unlock()
+			if peer == nil {
+				panic("peer is nil")
+			}
+
+			peer.UnassignPiece(pieceID)
+			c.FillPeerQueue(peer)
+
 			// notify all peers that we have a piece
 			// c.NotifyPeers(result.Index)
 		}
 	}
 }
+
+// type Info struct {
+// 	InfoHash          [20]byte
+// 	NumOfPieces       int
+// 	TotalLength       int
+// 	PieceLength       int
+// 	BlockSize         int
+// 	NumBlocksPerPiece int
+// }
+
+// func (c *Client) NotifyPeers(pieceID int) {
+// 	c.mu.Lock()
+// 	peers := c.peers
+// 	c.mu.Unlock()
+// 	fmt.Println("Sending have: ", pieceID)
+// 	for _, peer := range peers {
+// 		if err := peer.SendHave(pieceID); err != nil {
+// 			fmt.Printf("failed to send HAVE message to peer: %s - closing and removing\n", peer.Addr)
+// 			c.RemovePeer(peer)
+// 		}
+// 	}
+// }
