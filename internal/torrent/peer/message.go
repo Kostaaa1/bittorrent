@@ -2,6 +2,7 @@ package peer
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 )
 
@@ -64,11 +65,13 @@ func (msg *Message) Bytes() []byte {
 	return buf
 }
 
+const MaxBlockSize = 1 << 14 // 16KB
+const MaxMessageSize = MaxBlockSize + 9
+
 func ReadMessage(r io.Reader) (*Message, error) {
 	var length uint32
 
-	err := binary.Read(r, binary.BigEndian, &length)
-	if err != nil {
+	if err := binary.Read(r, binary.BigEndian, &length); err != nil {
 		return nil, err
 	}
 
@@ -76,24 +79,55 @@ func ReadMessage(r io.Reader) (*Message, error) {
 		return &Message{}, nil
 	}
 
-	var b [1]byte
-	if _, err = io.ReadFull(r, b[:]); err != nil {
+	if length > MaxMessageSize {
+		fmt.Println("OCCURRED")
+		return nil, fmt.Errorf("message too large: %d", length)
+	}
+
+	var idBuf [1]byte
+	if _, err := io.ReadFull(r, idBuf[:]); err != nil {
 		return nil, err
 	}
 
-	id := b[0]
-
 	payload := make([]byte, length-1)
-
-	_, err = io.ReadFull(r, payload)
-	if err != nil {
+	if _, err := io.ReadFull(r, payload); err != nil {
 		return nil, err
 	}
 
 	return &Message{
-		ID:      messageID(id),
+		ID:      messageID(idBuf[0]),
 		Payload: payload,
 	}, nil
+
+	// var length uint32
+
+	// err := binary.Read(r, binary.BigEndian, &length)
+	// if err != nil {
+	// 	return nil, err
+	// }
+
+	// if length == 0 {
+	// 	return &Message{}, nil
+	// }
+
+	// var b [1]byte
+	// if _, err = io.ReadFull(r, b[:]); err != nil {
+	// 	return nil, err
+	// }
+
+	// id := b[0]
+
+	// payload := make([]byte, length-1)
+
+	// _, err = io.ReadFull(r, payload)
+	// if err != nil {
+	// 	return nil, err
+	// }
+
+	// return &Message{
+	// 	ID:      messageID(id),
+	// 	Payload: payload,
+	// }, nil
 }
 
 type PieceMessage struct {

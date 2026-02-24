@@ -1,29 +1,36 @@
 package torrent
 
 import (
-	"context"
 	"encoding/hex"
 	"fmt"
-	"log/slog"
-	"math"
-	"net"
 	"os"
-	"sync"
-	"sync/atomic"
-	"test/internal/torrent/client"
-	"test/internal/torrent/io"
-	"test/internal/torrent/peer"
-	"test/internal/torrent/tracker"
 	"test/pkg/bencode"
-	"time"
 )
+
+type FileEntry struct {
+	ID          int
+	File        *os.File
+	FullPath    string
+	Length      int
+	StartOffset int
+	EndOffset   int
+}
+
+type TorrentInfo struct {
+	InfoHash          [20]byte
+	NumOfPieces       int
+	TotalLength       int
+	PieceLength       int
+	BlockSize         int
+	NumBlocksPerPiece int
+}
 
 type TorrentFile struct {
 	TotalLength  int
 	PieceLength  int
 	Announce     string
 	UrlList      []string
-	Files        []*io.FileEntry
+	Files        []*FileEntry
 	Name         string
 	Pieces       [][20]byte
 	InfoHash     [20]byte
@@ -52,118 +59,91 @@ func NewFile(filename string) (*TorrentFile, error) {
 	return src.toTorrentFile()
 }
 
-func newLogger() *slog.Logger {
-	opts := &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-			if a.Key == slog.TimeKey && len(groups) == 0 {
-				return slog.Attr{}
-			}
-			return a
-		},
-	}
-	logger := slog.New(slog.NewTextHandler(os.Stdout, opts))
-	slog.SetDefault(logger)
-	return logger
-}
+// func (tf *TorrentFile) Download(ctx context.Context, clientID [20]byte, port uint16) error {
+// 	hs := peer.Handshake{
+// 		Pstr:      []byte("BitTorrent protocol"),
+// 		Reserverd: [8]byte{},
+// 		InfoHash:  tf.InfoHash,
+// 		PeerID:    clientID,
+// 	}
 
-func (tf *TorrentFile) Download(ctx context.Context, clientID [20]byte, port uint16) error {
-	fmt.Println("LENGTH OF PIECES:", len(tf.Pieces))
+// 	blockSize := int(math.Pow(2, 14))
+// 	numBlocksPerPiece := tf.PieceLength / blockSize
 
-	hs := peer.Handshake{
-		Pstr:      []byte("BitTorrent protocol"),
-		Reserverd: [8]byte{},
-		InfoHash:  tf.InfoHash,
-		PeerID:    clientID,
-	}
+// 	writer := io.NewPieceWriter(
+// 		tf.PieceLength,
+// 		tf.Pieces,
+// 		tf.Files,
+// 		tf.TotalLength,
+// 		numBlocksPerPiece,
+// 		blockSize,
+// 	)
 
-	blockSize := int(math.Pow(2, 14))
-	numBlocksPerPiece := tf.PieceLength / blockSize
+// 	logger := newLogger()
+// 	writerC, resultC := writer.Channles()
+// 	client := client.New(tf.Pieces, logger)
+// 	var peerCounter uint64 = 0
+// 	peerCh := make(chan tracker.PeerAddress)
 
-	writer := io.NewPieceWriter(
-		tf.PieceLength,
-		tf.Pieces,
-		tf.Files,
-		tf.TotalLength,
-		numBlocksPerPiece,
-		blockSize,
-	)
+// 	announcer := tracker.NewAnnouncer(
+// 		tf.InfoHash,
+// 		clientID,
+// 		port,
+// 		uint64(tf.TotalLength),
+// 		peerCh,
+// 		tf.Announce,
+// 		tf.AnnounceList,
+// 		true,
+// 	)
+// 	go announcer.Run(ctx)
+// 	go client.CollectResults(announcer, resultC)
+// 	go writer.Start()
 
-	logger := newLogger()
-	writerC, resultC := writer.Channles()
-	client := client.New(tf.Pieces, logger)
-	var peerCounter uint64 = 0
-	peerCh := make(chan tracker.PeerAddress)
+// 	// maxConnectedPeers := 0
+// 	// peerSem := make(chan struct{}, maxConnectedPeers)
 
-	announcer := tracker.NewAnnouncer(
-		tf.InfoHash,
-		clientID,
-		port,
-		uint64(tf.TotalLength),
-		peerCh,
-		tf.Announce,
-		tf.AnnounceList,
-		true,
-	)
+// 	for p := range peerCh {
+// 		go func() {
+// 			// peerSem <- struct{}{}
+// 			// defer func() { <-peerSem }()
+// 			conn, err := net.DialTimeout("tcp", p.IP4Addr(), time.Second*5)
+// 			if err != nil {
+// 				logger.Error("failed to dial", "error", err)
+// 				return
+// 			}
 
-	go announcer.Run(ctx)
-	go writer.Start()
-	go client.CollectResults(announcer, resultC)
+// 			peerID := atomic.AddUint64(&peerCounter, 1) - 1
 
-	// maxConnectedPeers := 0
-	// peerSem := make(chan struct{}, maxConnectedPeers)
+// 			peer := peer.New(peerID, conn, writerC, logger)
+// 			peer.SetInfo(
+// 				len(tf.Pieces),
+// 				tf.TotalLength,
+// 				tf.PieceLength,
+// 				blockSize,
+// 				numBlocksPerPiece,
+// 			)
+// 			peer.OnUnchoke = func() {
+// 				client.FillPeerQueue(peer)
+// 			}
+// 			peer.OnChoke = func(pieces []int) {
+// 				logger.Info("OnChoke ran", "free_pieces", pieces)
+// 				for _, piece := range pieces {
+// 					client.FreePiece(piece)
+// 				}
+// 			}
+// 			peer.OnHandshake = func() {
+// 				client.AddPeer(peer)
+// 			}
+// 			if err := peer.Open(ctx, hs, client.Bitfield); err != nil {
+// 				logger.Error("[PEER DISCONNECT]", "error: failed to read message", err)
+// 				client.RemovePeer(peer)
+// 				return
+// 			}
+// 		}()
+// 	}
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
-		for p := range peerCh {
-			go func() {
-				// peerSem <- struct{}{}
-				// defer func() { <-peerSem }()
-
-				conn, err := net.DialTimeout("tcp", p.IP4Addr(), time.Second*5)
-				if err != nil {
-					logger.Error("failed to dial", "error", err)
-					return
-				}
-
-				peerID := atomic.AddUint64(&peerCounter, 1) - 1
-
-				peer := peer.New(peerID, conn, writerC, logger)
-				peer.SetInfo(
-					len(tf.Pieces),
-					tf.TotalLength,
-					tf.PieceLength,
-					blockSize,
-					numBlocksPerPiece,
-				)
-				peer.OnUnchoke = func() {
-					client.FillPeerQueue(peer)
-				}
-				peer.OnChoke = func(pieces []int) {
-					logger.Info("OnChoke ran", "free_pieces", pieces)
-					for _, piece := range pieces {
-						client.FreePiece(piece)
-					}
-				}
-				peer.OnHandshake = func() {
-					client.AddPeer(peer)
-				}
-				if err := peer.Open(ctx, hs, client.Bitfield); err != nil {
-					logger.Error("[PEER DISCONNECT]", "error: failed to read message", err)
-					client.RemovePeer(peer)
-					return
-				}
-			}()
-		}
-	}()
-
-	wg.Wait()
-
-	return nil
-}
+// 	return nil
+// }
 
 func (b *TorrentFile) Print() {
 	prefix := "  "

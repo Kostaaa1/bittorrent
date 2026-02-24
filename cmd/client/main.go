@@ -3,9 +3,16 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"fmt"
 	"log"
+	"log/slog"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
+	"runtime"
 	"test/internal/torrent"
+	"test/internal/torrent/client"
+	"time"
 )
 
 func getClientID() ([20]byte, error) {
@@ -15,6 +22,12 @@ func getClientID() ([20]byte, error) {
 		return buf, err
 	}
 	return buf, nil
+}
+
+func init() {
+	go func() {
+		http.ListenAndServe("localhost:6060", nil)
+	}()
 }
 
 func main() {
@@ -30,15 +43,52 @@ func main() {
 	}
 	tf.Print()
 
+	go func() {
+		for {
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			fmt.Printf("Alloc = %v MB\n", m.Alloc/1024/1024)
+			time.Sleep(2 * time.Second)
+		}
+	}()
+
 	clientID, err := getClientID()
 	if err != nil {
 		log.Fatal(err)
 	}
 	var port uint16 = 6881
 
+	blockSize := 16384
+	NumBlocksPerPiece := tf.PieceLength / blockSize
+
+	info := &torrent.TorrentInfo{
+		InfoHash:          tf.InfoHash,
+		NumOfPieces:       len(tf.Pieces),
+		TotalLength:       tf.TotalLength,
+		PieceLength:       tf.PieceLength,
+		BlockSize:         blockSize,
+		NumBlocksPerPiece: NumBlocksPerPiece,
+	}
+
+	log := newLogger()
+
+	c := client.New(clientID, port, info, tf.Pieces, tf.Files, tf.Announce, tf.AnnounceList, log)
 	ctx := context.Background()
 
-	if err := tf.Download(ctx, clientID, port); err != nil {
-		log.Fatal(err)
+	c.Run(ctx)
+}
+
+func newLogger() *slog.Logger {
+	opts := &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey && len(groups) == 0 {
+				return slog.Attr{}
+			}
+			return a
+		},
 	}
+	logger := slog.New(slog.NewTextHandler(os.Stdout, opts))
+	slog.SetDefault(logger)
+	return logger
 }

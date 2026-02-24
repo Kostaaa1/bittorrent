@@ -7,19 +7,11 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"test/internal/torrent"
 	"test/internal/torrent/peer"
 )
 
-type FileEntry struct {
-	ID          int
-	file        *os.File
-	FullPath    string
-	Length      int
-	StartOffset int
-	EndOffset   int
-}
-
-type PieceBuffer struct {
+type pieceBuffer struct {
 	index       int
 	size        int
 	hash        [20]byte
@@ -35,51 +27,40 @@ type Result struct {
 	Err      error
 }
 
-func (pb *PieceBuffer) verify() bool {
+func (pb *pieceBuffer) verify() bool {
 	return sha1.Sum(pb.buffer) == pb.hash
 }
 
-func (pb *PieceBuffer) writeBlock(begin int, block []byte) {
+func (pb *pieceBuffer) writeBlock(begin int, block []byte) {
 	copy(pb.buffer[begin:], block)
 	pb.blockCount++
 }
 
 type PieceWriter struct {
-	numBlocksPerPiece int
-	numOfPieces       int
-	totalLength       int
-	pieceLength       int
-	blockSize         int
-	hashPieces        [][20]byte
-	pieces            map[int]*PieceBuffer
-	worker            chan peer.PieceMessage
-	files             []*FileEntry
-	results           chan Result
-	log               *log.Logger
+	info       *torrent.TorrentInfo
+	pieces     map[int]*pieceBuffer
+	worker     chan peer.PieceMessage
+	files      []*torrent.FileEntry
+	results    chan Result
+	log        *log.Logger
+	hashPieces [][20]byte
 }
 
 func NewPieceWriter(
-	pieceLength int,
+	info *torrent.TorrentInfo,
 	pieces [][20]byte,
-	entries []*FileEntry,
-	totalLength,
-	numBlocksPerPiece int,
-	blockSize int,
+	entries []*torrent.FileEntry,
 ) *PieceWriter {
 	f, _ := os.OpenFile("log.txt", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	log := log.New(f, "", log.Ltime)
 	return &PieceWriter{
-		worker:            make(chan peer.PieceMessage),
-		results:           make(chan Result),
-		pieces:            make(map[int]*PieceBuffer),
-		files:             entries,
-		hashPieces:        pieces,
-		pieceLength:       pieceLength,
-		blockSize:         blockSize,
-		numBlocksPerPiece: numBlocksPerPiece,
-		numOfPieces:       len(pieces),
-		totalLength:       totalLength,
-		log:               log,
+		hashPieces: pieces,
+		worker:     make(chan peer.PieceMessage),
+		results:    make(chan Result),
+		pieces:     make(map[int]*pieceBuffer),
+		files:      entries,
+		info:       info,
+		log:        log,
 	}
 }
 
@@ -88,22 +69,21 @@ func (pw *PieceWriter) Channles() (chan peer.PieceMessage, <-chan Result) {
 }
 
 func (pw *PieceWriter) getPieceSize(pieceID int) (int, int) {
-	size := pw.pieceLength
-	blocks := pw.numBlocksPerPiece
-	lastPiece := pw.numOfPieces - 1
+	size := pw.info.PieceLength
+	blocks := pw.info.NumBlocksPerPiece
+	lastPiece := pw.info.NumOfPieces - 1
 	if pieceID == lastPiece {
-		size = pw.totalLength - (lastPiece * pw.pieceLength)
-		blocks = int(math.Ceil(float64(size) / float64(pw.blockSize)))
+		size = pw.info.TotalLength - (lastPiece * pw.info.PieceLength)
+		blocks = int(math.Ceil(float64(size) / float64(pw.info.BlockSize)))
 	}
 	return size, blocks
 }
 
-func (pw *PieceWriter) writeBlock(msg peer.PieceMessage) *PieceBuffer {
+func (pw *PieceWriter) writeBlock(msg peer.PieceMessage) *pieceBuffer {
 	pbuf := pw.pieces[msg.Index]
-
 	if pbuf == nil {
 		size, blocks := pw.getPieceSize(msg.Index)
-		pbuf = &PieceBuffer{
+		pbuf = &pieceBuffer{
 			totalBlocks: blocks,
 			index:       msg.Index,
 			blockCount:  0,
@@ -112,10 +92,8 @@ func (pw *PieceWriter) writeBlock(msg peer.PieceMessage) *PieceBuffer {
 			hash:        pw.hashPieces[msg.Index],
 		}
 	}
-
 	pbuf.writeBlock(msg.Begin, msg.Block)
 	pw.pieces[msg.Index] = pbuf
-
 	return pbuf
 }
 
@@ -131,7 +109,6 @@ func (pw *PieceWriter) Start() error {
 			}
 			if !piece.verify() {
 				result.Err = fmt.Errorf("hashes do not match for piece %d", msg.Index)
-
 				fmt.Println("TARGET:", msg.Index, piece.index)
 				fmt.Println("Block:", sha1.Sum(msg.Block))
 				fmt.Println("Buffer:", sha1.Sum(piece.buffer))
@@ -151,8 +128,8 @@ func (pw *PieceWriter) Start() error {
 	return nil
 }
 
-func (w *PieceWriter) getFileEntry(pieceID int) (entry *FileEntry, id int, err error) {
-	offset := pieceID * w.pieceLength
+func (w *PieceWriter) getFileEntry(pieceID int) (entry *torrent.FileEntry, id int, err error) {
+	offset := pieceID * w.info.PieceLength
 	for i, f := range w.files {
 		if offset <= f.EndOffset {
 			id = i
@@ -164,8 +141,8 @@ func (w *PieceWriter) getFileEntry(pieceID int) (entry *FileEntry, id int, err e
 	return
 }
 
-func (w *PieceWriter) setEntryFile(entry *FileEntry) error {
-	if entry.file != nil {
+func (w *PieceWriter) setEntryFile(entry *torrent.FileEntry) error {
+	if entry.File != nil {
 		return nil
 	}
 
@@ -188,7 +165,7 @@ func (w *PieceWriter) setEntryFile(entry *FileEntry) error {
 	if err != nil {
 		return err
 	}
-	entry.file = f
+	entry.File = f
 
 	return nil
 }
@@ -203,7 +180,7 @@ func (w *PieceWriter) writePiece(pieceID int, piece []byte) (int, error) {
 		return 0, err
 	}
 
-	pieceOffset := pieceID * w.pieceLength
+	pieceOffset := pieceID * w.info.PieceLength
 	entryOffset := pieceOffset - entry.StartOffset
 
 	if entryOffset+len(piece) > entry.Length {
@@ -214,7 +191,7 @@ func (w *PieceWriter) writePiece(pieceID int, piece []byte) (int, error) {
 
 		w.log.Println("[DOWNLOADED PIECE]", "piece_index=", pieceID, len(piece))
 
-		if _, err := entry.file.WriteAt(start, int64(entryOffset)); err != nil {
+		if _, err := entry.File.WriteAt(start, int64(entryOffset)); err != nil {
 			return 0, err
 		}
 
@@ -226,7 +203,7 @@ func (w *PieceWriter) writePiece(pieceID int, piece []byte) (int, error) {
 				return 0, err
 			}
 
-			remainderN, err := entry.file.WriteAt(remainder, 0)
+			remainderN, err := entry.File.WriteAt(remainder, 0)
 			if err != nil {
 				return 0, err
 			}
@@ -238,5 +215,5 @@ func (w *PieceWriter) writePiece(pieceID int, piece []byte) (int, error) {
 
 	w.log.Println("[DOWNLOADED PIECE]", "piece_index=", pieceID, len(piece))
 
-	return entry.file.WriteAt(piece, int64(entryOffset))
+	return entry.File.WriteAt(piece, int64(entryOffset))
 }

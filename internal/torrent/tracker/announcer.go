@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
-	"time"
 )
 
 type AnnEvent string
@@ -75,31 +74,32 @@ func (announcer *Announcer) Run(ctx context.Context) {
 					fmt.Println("failed to get ther response for announce announce:", announce, err)
 					continue
 				}
+				_ = interval
 
-				if !announcer.isMultiTracker && announcer.active > 0 {
-					return
-				}
-				announcer.active++
+				// if !announcer.isMultiTracker && announcer.active > 0 {
+				// 	return
+				// }
+				// announcer.active++
 
-				if interval == 0 {
-					interval = 600
-				}
+				// if interval == 0 {
+				// 	interval = 600
+				// }
 
-				go func() {
-					ticker := time.NewTicker(time.Duration(interval) * time.Second)
-					for {
-						select {
-						case <-ctx.Done():
-							ticker.Stop()
-							return
-						case <-ticker.C:
-							_, err := announcer.run(announce)
-							if err != nil {
-								fmt.Println("failed tick announce:", err)
-							}
-						}
-					}
-				}()
+				// go func() {
+				// 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
+				// 	for {
+				// 		select {
+				// 		case <-ctx.Done():
+				// 			ticker.Stop()
+				// 			return
+				// 		case <-ticker.C:
+				// 			_, err := announcer.run(announce)
+				// 			if err != nil {
+				// 				fmt.Println("failed tick announce:", err)
+				// 			}
+				// 		}
+				// 	}
+				// }()
 			}
 		}
 	} else {
@@ -110,26 +110,27 @@ func (announcer *Announcer) Run(ctx context.Context) {
 			fmt.Println("failed to get the response for announce tracker:", tracker, err)
 			return
 		}
+		_ = interval
 
-		if interval == 0 {
-			interval = 600
-		}
+		// if interval == 0 {
+		// 	interval = 600
+		// }
 
-		go func() {
-			ticker := time.NewTicker(time.Duration(interval) * time.Second)
-			for {
-				select {
-				case <-ctx.Done():
-					ticker.Stop()
-					return
-				case <-ticker.C:
-					_, err := announcer.run(tracker)
-					if err != nil {
-						fmt.Println("failed tick announce:", err)
-					}
-				}
-			}
-		}()
+		// go func() {
+		// 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
+		// 	for {
+		// 		select {
+		// 		case <-ctx.Done():
+		// 			ticker.Stop()
+		// 			return
+		// 		case <-ticker.C:
+		// 			_, err := announcer.run(tracker)
+		// 			if err != nil {
+		// 				fmt.Println("failed tick announce:", err)
+		// 			}
+		// 		}
+		// 	}
+		// }()
 	}
 }
 
