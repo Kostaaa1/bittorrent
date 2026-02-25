@@ -8,34 +8,32 @@ import (
 	"sync"
 	"sync/atomic"
 	"test/internal/torrent"
-	"test/internal/torrent/io"
 	"test/internal/torrent/peer"
 	"test/internal/torrent/tracker"
 	"time"
 )
 
 type Client struct {
-	ID         [20]byte
-	Port       uint16
-	Bitfield   peer.Bitfield
+	ID       [20]byte
+	Port     uint16
+	Bitfield peer.Bitfield
+
 	assigned   map[int]uint64
 	unassigned map[int]struct{}
-	mu         sync.Mutex
-	writer     *io.PieceWriter
-	announcer  *tracker.Announcer
-	info       *torrent.TorrentInfo
+	peers      map[uint64]*peer.Peer
 
+	mu        sync.Mutex
+	writer    *peer.PieceWriter
+	announcer *tracker.Announcer
+	info      *torrent.TorrentInfo
 	// keep track of active peers
-	peers       map[uint64]*peer.Peer
 	peerCh      <-chan tracker.PeerAddress
 	peerCounter uint64
-
-	log *slog.Logger
-
 	// keep track of connections
 	maxGlobalConnections int
 	maxConnectedPeers    int
 	maxHalfOpen          int
+	log                  *slog.Logger
 }
 
 func New(
@@ -54,8 +52,8 @@ func New(
 	}
 
 	peerCh := make(chan tracker.PeerAddress)
-	writer := io.NewPieceWriter(info, pieces, files)
 
+	writer := peer.NewPieceWriter(info, pieces, files)
 	announcer := tracker.NewAnnouncer(
 		info.InfoHash,
 		clientID,
@@ -72,14 +70,15 @@ func New(
 		Port:        port,
 		Bitfield:    make([]byte, (len(pieces)+7)/8),
 		assigned:    make(map[int]uint64),
-		unassigned:  unassigned,
 		peers:       make(map[uint64]*peer.Peer, 0),
+		unassigned:  unassigned,
 		writer:      writer,
 		announcer:   announcer,
 		peerCh:      peerCh,
 		peerCounter: 0,
 		info:        info,
 		log:         log,
+		// maxConnectedPeers: 1,
 	}
 }
 
@@ -113,7 +112,7 @@ func (c *Client) assignPiece(peer *peer.Peer, pieceID int) {
 }
 
 // TODO: If unnassigned is empty, try to assign the piece from other peer queue
-func (c *Client) fillPeerQueue(peer *peer.Peer) {
+func (c *Client) fillPeerPipeline(peer *peer.Peer) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -132,7 +131,18 @@ func (c *Client) fillPeerQueue(peer *peer.Peer) {
 	}
 }
 
-func (c *Client) collectResults(results <-chan io.Result) {
+func (c *Client) assignedPeer(pieceID int) *peer.Peer {
+	c.mu.Lock()
+	assigned := c.assigned[pieceID]
+	peer := c.peers[assigned]
+	c.mu.Unlock()
+	if peer == nil {
+		panic("PEER IS NIL")
+	}
+	return peer
+}
+
+func (c *Client) collectResults(results <-chan peer.Result) {
 	for result := range results {
 		if result.Err != nil {
 			c.log.Debug(
@@ -157,21 +167,11 @@ func (c *Client) collectResults(results <-chan io.Result) {
 			peer := c.assignedPeer(result.Index)
 			peer.UnassignPiece(result.Index)
 			// assign new pieces as long as peer can accept it
-			c.fillPeerQueue(peer)
+			c.fillPeerPipeline(peer)
 			// notify/send have message to all peers that we have a piece
 			// c.NotifyPeers(result.Index)
 		}
 	}
-}
-
-func (c *Client) assignedPeer(pieceID int) *peer.Peer {
-	c.mu.Lock()
-	peer := c.peers[c.assigned[pieceID]]
-	c.mu.Unlock()
-	if peer == nil {
-		panic("PEER IS NIL")
-	}
-	return peer
 }
 
 func (c *Client) Run(ctx context.Context) {
@@ -182,21 +182,23 @@ func (c *Client) Run(ctx context.Context) {
 		InfoHash:  c.info.InfoHash,
 	}
 
-	writerC, resultC := c.writer.Channles()
+	writerC, resultC := c.writer.Channels()
 
-	go c.printPeers()
 	go c.announcer.Run(ctx)
-	go c.writer.Start()
+	go c.writer.Run()
 	go c.collectResults(resultC)
 
-	// MaxConnectedPeers
-	// maxConnectedPeers := 0
-	// peerSem := make(chan struct{}, 5)
+	var peerSem chan struct{}
+	if c.maxConnectedPeers > 0 {
+		peerSem = make(chan struct{}, c.maxConnectedPeers)
+	}
 
 	for p := range c.peerCh {
 		go func() {
-			// peerSem <- struct{}{}
-			// defer func() { <-peerSem }()
+			if c.maxConnectedPeers > 0 {
+				peerSem <- struct{}{}
+				defer func() { <-peerSem }()
+			}
 
 			conn, err := net.DialTimeout("tcp", p.IP4Addr(), time.Second*5)
 			if err != nil {
@@ -205,12 +207,12 @@ func (c *Client) Run(ctx context.Context) {
 			}
 
 			peerID := atomic.AddUint64(&c.peerCounter, 1) - 1
-
 			peer := peer.New(peerID, conn, c.info, writerC, c.log)
 			peer.OnUnchoke = func() {
-				c.fillPeerQueue(peer)
+				c.fillPeerPipeline(peer)
 			}
 			peer.OnChoke = func(pieces []int) {
+				// Since peer is choking, we need to reassign its current pieces to another peer.
 				c.log.Info("OnChoke RAN", "free_pieces", pieces)
 				for _, piece := range pieces {
 					c.freePiece(piece)
@@ -219,6 +221,7 @@ func (c *Client) Run(ctx context.Context) {
 			peer.OnHandshake = func() {
 				c.addPeer(peer)
 			}
+
 			if err := peer.Open(ctx, hs, c.Bitfield); err != nil {
 				c.log.Error("[PEER DISCONNECT]", "error: failed to read message", err)
 				c.removePeer(peer)

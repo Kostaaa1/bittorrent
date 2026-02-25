@@ -215,15 +215,13 @@ func (peer *Peer) AssignedPieces() []int {
 	return peer.pipeline.assignedPieces()
 }
 
-func (p *Peer) keepaliveDispatch() {
-
+func (p *Peer) Close() error {
+	pieces := p.AssignedPieces()
+	p.OnChoke(pieces)
+	return p.conn.Close()
 }
 
-func (p *Peer) Open(
-	ctx context.Context,
-	hs Handshake,
-	b Bitfield,
-) error {
+func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 	defer p.conn.Close()
 
 	p.log = slog.With("peer", p.conn.RemoteAddr())
@@ -264,19 +262,11 @@ func (p *Peer) Open(
 
 		msg, err := ReadMessage(p.conn)
 		if err != nil {
-			fmt.Println("ERROR:", err)
 			if errors.Is(err, io.EOF) {
 				return nil
-			}
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				p.conn.SetReadDeadline(time.Time{})
+			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				p.log.Debug("[SLOW PEER]")
-
-				pieces := p.AssignedPieces()
-				p.OnChoke(pieces)
-				p.pipeline = nil
-				p.amInterested = false
-				p.sendUninterested()
+				return p.Close()
 			}
 			return err
 		}
@@ -319,7 +309,6 @@ func (p *Peer) Open(
 			if p.pipeline != nil {
 				p.dispatchRequests()
 			}
-
 			p.conn.SetReadDeadline(time.Now().Add(time.Second * 10))
 		case MsgHave:
 			p.log.Debug("[REQUEST]")

@@ -6,6 +6,9 @@ import (
 	"io"
 )
 
+const MaxBlockSize = 1 << 14 // 16KB
+const MaxMessageSize = MaxBlockSize + 9
+
 type messageID byte
 
 const (
@@ -65,12 +68,8 @@ func (msg *Message) Bytes() []byte {
 	return buf
 }
 
-const MaxBlockSize = 1 << 14 // 16KB
-const MaxMessageSize = MaxBlockSize + 9
-
 func ReadMessage(r io.Reader) (*Message, error) {
 	var length uint32
-
 	if err := binary.Read(r, binary.BigEndian, &length); err != nil {
 		return nil, err
 	}
@@ -98,36 +97,6 @@ func ReadMessage(r io.Reader) (*Message, error) {
 		ID:      messageID(idBuf[0]),
 		Payload: payload,
 	}, nil
-
-	// var length uint32
-
-	// err := binary.Read(r, binary.BigEndian, &length)
-	// if err != nil {
-	// 	return nil, err
-	// }
-
-	// if length == 0 {
-	// 	return &Message{}, nil
-	// }
-
-	// var b [1]byte
-	// if _, err = io.ReadFull(r, b[:]); err != nil {
-	// 	return nil, err
-	// }
-
-	// id := b[0]
-
-	// payload := make([]byte, length-1)
-
-	// _, err = io.ReadFull(r, payload)
-	// if err != nil {
-	// 	return nil, err
-	// }
-
-	// return &Message{
-	// 	ID:      messageID(id),
-	// 	Payload: payload,
-	// }, nil
 }
 
 type PieceMessage struct {

@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
 	"test/pkg/bencode"
 )
 
@@ -14,6 +15,36 @@ type FileEntry struct {
 	Length      int
 	StartOffset int
 	EndOffset   int
+}
+
+func (entry *FileEntry) OpenFile() error {
+	if entry.File != nil {
+		return nil
+	}
+
+	fullPath := entry.FullPath
+	dir := filepath.Dir(fullPath)
+
+	info, err := os.Stat(dir)
+	if err == nil && !info.IsDir() {
+		return fmt.Errorf("%s exists but is not a directory", dir)
+	}
+
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+
+	f, err := os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	entry.File = f
+
+	return nil
 }
 
 type TorrentInfo struct {
@@ -58,92 +89,6 @@ func NewFile(filename string) (*TorrentFile, error) {
 
 	return src.toTorrentFile()
 }
-
-// func (tf *TorrentFile) Download(ctx context.Context, clientID [20]byte, port uint16) error {
-// 	hs := peer.Handshake{
-// 		Pstr:      []byte("BitTorrent protocol"),
-// 		Reserverd: [8]byte{},
-// 		InfoHash:  tf.InfoHash,
-// 		PeerID:    clientID,
-// 	}
-
-// 	blockSize := int(math.Pow(2, 14))
-// 	numBlocksPerPiece := tf.PieceLength / blockSize
-
-// 	writer := io.NewPieceWriter(
-// 		tf.PieceLength,
-// 		tf.Pieces,
-// 		tf.Files,
-// 		tf.TotalLength,
-// 		numBlocksPerPiece,
-// 		blockSize,
-// 	)
-
-// 	logger := newLogger()
-// 	writerC, resultC := writer.Channles()
-// 	client := client.New(tf.Pieces, logger)
-// 	var peerCounter uint64 = 0
-// 	peerCh := make(chan tracker.PeerAddress)
-
-// 	announcer := tracker.NewAnnouncer(
-// 		tf.InfoHash,
-// 		clientID,
-// 		port,
-// 		uint64(tf.TotalLength),
-// 		peerCh,
-// 		tf.Announce,
-// 		tf.AnnounceList,
-// 		true,
-// 	)
-// 	go announcer.Run(ctx)
-// 	go client.CollectResults(announcer, resultC)
-// 	go writer.Start()
-
-// 	// maxConnectedPeers := 0
-// 	// peerSem := make(chan struct{}, maxConnectedPeers)
-
-// 	for p := range peerCh {
-// 		go func() {
-// 			// peerSem <- struct{}{}
-// 			// defer func() { <-peerSem }()
-// 			conn, err := net.DialTimeout("tcp", p.IP4Addr(), time.Second*5)
-// 			if err != nil {
-// 				logger.Error("failed to dial", "error", err)
-// 				return
-// 			}
-
-// 			peerID := atomic.AddUint64(&peerCounter, 1) - 1
-
-// 			peer := peer.New(peerID, conn, writerC, logger)
-// 			peer.SetInfo(
-// 				len(tf.Pieces),
-// 				tf.TotalLength,
-// 				tf.PieceLength,
-// 				blockSize,
-// 				numBlocksPerPiece,
-// 			)
-// 			peer.OnUnchoke = func() {
-// 				client.FillPeerQueue(peer)
-// 			}
-// 			peer.OnChoke = func(pieces []int) {
-// 				logger.Info("OnChoke ran", "free_pieces", pieces)
-// 				for _, piece := range pieces {
-// 					client.FreePiece(piece)
-// 				}
-// 			}
-// 			peer.OnHandshake = func() {
-// 				client.AddPeer(peer)
-// 			}
-// 			if err := peer.Open(ctx, hs, client.Bitfield); err != nil {
-// 				logger.Error("[PEER DISCONNECT]", "error: failed to read message", err)
-// 				client.RemovePeer(peer)
-// 				return
-// 			}
-// 		}()
-// 	}
-
-// 	return nil
-// }
 
 func (b *TorrentFile) Print() {
 	prefix := "  "

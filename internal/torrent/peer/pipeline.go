@@ -4,6 +4,11 @@ import (
 	"sync"
 )
 
+type assignedPiece struct {
+	pieceID int
+	// blocksToRequest []int
+}
+
 // TODO:
 // if slow peer has dispatched requests, and peer does not send the pieces for those requests, there is no way of getting dispatched pieces back (they need to be reassigned). change data structure for pieces to []int.
 type pipeline struct {
@@ -12,8 +17,7 @@ type pipeline struct {
 	nextBlock   int
 	maxAssigned int
 	// current active piece that is being requested
-	active    int
-	hasActive bool
+	active *assignedPiece
 	// used for assigning active/curr pieces
 	queue chan int
 	// when piece is received from peer, we delete from assigned
@@ -34,8 +38,7 @@ func newPipeline() *pipeline {
 		nextBlock:   0,
 		queue:       make(chan int, maxAssigned),
 		assigned:    make(map[int]struct{}),
-		active:      0,
-		hasActive:   false,
+		active:      nil,
 	}
 }
 
@@ -66,42 +69,40 @@ func (p *pipeline) assign(piece int) {
 func (p *pipeline) assignedPieces() []int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
 	pieces := make([]int, 0, len(p.assigned))
 	for piece := range p.assigned {
 		pieces = append(pieces, piece)
 	}
-
 	return pieces
 }
 
 func (p *pipeline) getActiveOrAssignNext() (int, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.hasActive {
-		return p.active, true
+	if p.active != nil {
+		return p.active.pieceID, true
 	}
 	return p.assignNextLocked()
 }
 
 func (p *pipeline) assignNextLocked() (int, bool) {
 	select {
-	case piece, ok := <-p.queue:
+	case pieceID, ok := <-p.queue:
 		if !ok {
-			p.active = 0
-			p.hasActive = false
+			// p.active = 0
+			p.active = nil
 			return -1, false
 		}
 
 		p.nextBlock = 0
-		p.active = piece
-		p.hasActive = true
+		// p.active = piece
+		p.active = &assignedPiece{pieceID: pieceID}
 
-		return piece, true
+		return pieceID, true
 
 	default:
-		p.hasActive = false
-		p.active = 0
+		// p.hasActive = false
+		p.active = nil
 		return -1, false
 	}
 }

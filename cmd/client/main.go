@@ -3,16 +3,14 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
-	"runtime"
 	"test/internal/torrent"
 	"test/internal/torrent/client"
-	"time"
+	"test/internal/torrent/peer"
 )
 
 func getClientID() ([20]byte, error) {
@@ -29,7 +27,6 @@ func init() {
 		http.ListenAndServe("localhost:6060", nil)
 	}()
 }
-
 func main() {
 	if len(os.Args) <= 1 {
 		panic("input missing")
@@ -43,30 +40,20 @@ func main() {
 	}
 	tf.Print()
 
-	go func() {
-		for {
-			var m runtime.MemStats
-			runtime.ReadMemStats(&m)
-			fmt.Printf("Alloc = %v MB\n", m.Alloc/1024/1024)
-			time.Sleep(2 * time.Second)
-		}
-	}()
-
 	clientID, err := getClientID()
 	if err != nil {
 		log.Fatal(err)
 	}
 	var port uint16 = 6881
 
-	blockSize := 16384
-	NumBlocksPerPiece := tf.PieceLength / blockSize
+	NumBlocksPerPiece := tf.PieceLength / peer.MaxBlockSize
 
 	info := &torrent.TorrentInfo{
 		InfoHash:          tf.InfoHash,
 		NumOfPieces:       len(tf.Pieces),
 		TotalLength:       tf.TotalLength,
 		PieceLength:       tf.PieceLength,
-		BlockSize:         blockSize,
+		BlockSize:         peer.MaxBlockSize,
 		NumBlocksPerPiece: NumBlocksPerPiece,
 	}
 
