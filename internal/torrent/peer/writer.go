@@ -58,7 +58,7 @@ func NewPieceWriter(
 	pieces [][20]byte,
 	entries []*torrent.FileEntry,
 ) *PieceWriter {
-	f, _ := os.OpenFile("log.txt", os.O_WRONLY|os.O_TRUNC|os.O_CREATE, 0644)
+	f, _ := os.OpenFile("writes.log", os.O_WRONLY|os.O_TRUNC|os.O_CREATE, 0644)
 	log := log.New(f, "", log.Ltime)
 	return &PieceWriter{
 		hashPieces: pieces,

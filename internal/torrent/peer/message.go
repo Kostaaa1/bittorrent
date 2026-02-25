@@ -79,7 +79,6 @@ func ReadMessage(r io.Reader) (*Message, error) {
 	}
 
 	if length > MaxMessageSize {
-		fmt.Println("OCCURRED")
 		return nil, fmt.Errorf("message too large: %d", length)
 	}
 

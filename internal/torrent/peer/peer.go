@@ -48,6 +48,7 @@ func (peer *Peer) dispatchRequests() {
 	for peer.pipeline.inflight < peer.pipeline.windowSize {
 		index, ok := peer.pipeline.getActiveOrAssignNext()
 		if !ok {
+			// TODO: ask scheduler for new piece. split peer assiGned to half and assign then to this one
 			fmt.Println("failed to get current or assign next")
 			return
 		}
@@ -237,21 +238,21 @@ func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 		p.OnHandshake()
 	}
 
+	p.conn.SetReadDeadline(time.Now().Add(time.Second * 30))
+
 	p.sendBitfield(b)
 	p.sendInterested()
 
-	if p.keepAliveTickInterval == 0 {
-		p.keepAliveTickInterval = time.Minute
-	}
-
-	ticker := time.NewTicker(p.keepAliveTickInterval)
-	defer ticker.Stop()
-
-	go func() {
-		for range ticker.C {
-			p.sendKeepAlive()
-		}
-	}()
+	// if p.keepAliveTickInterval == 0 {
+	// 	p.keepAliveTickInterval = time.Minute
+	// }
+	// ticker := time.NewTicker(p.keepAliveTickInterval)
+	// defer ticker.Stop()
+	// go func() {
+	// 	for range ticker.C {
+	// 		p.sendKeepAlive()
+	// 	}
+	// }()
 
 	for {
 		select {
@@ -275,13 +276,14 @@ func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 		case MsgChoke:
 			p.log.Debug("[CHOKE]")
 			p.peerChoking = true
-			pieces := p.AssignedPieces()
-			p.OnChoke(pieces)
-			p.pipeline = nil
+			p.OnChoke(p.AssignedPieces())
+			// p.pipeline = nil
 		case MsgUnchoke:
 			p.log.Debug("[UNCHOKE]")
 			p.peerChoking = false
-			p.pipeline = newPipeline()
+			if p.pipeline == nil {
+				p.pipeline = newPipeline()
+			}
 			p.OnUnchoke()
 			p.dispatchRequests()
 			p.conn.SetReadDeadline(time.Now().Add(time.Second * 10))

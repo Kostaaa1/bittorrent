@@ -22,10 +22,10 @@ type pipeline struct {
 	queue chan int
 	// when piece is received from peer, we delete from assigned
 	// if some period of time peer does not send the piece at all, we use this map to reassign the pieces to different peer.
-	assigned map[int]struct{}
-	// if peer respond with piece that fails the hash verification, then we blacklist the piece so we cannot assign it to this peer again
-	blacklist map[int]struct{}
-	mu        sync.Mutex
+	assigned []int
+	// if peer respond with piece that fails the hash verification, meaning that peer does not have valid piece, then we blacklist the piece so we cannot assign it to this peer again
+	// blacklist map[int]struct{}
+	mu sync.Mutex
 }
 
 func newPipeline() *pipeline {
@@ -37,8 +37,9 @@ func newPipeline() *pipeline {
 		inflight:    0,
 		nextBlock:   0,
 		queue:       make(chan int, maxAssigned),
-		assigned:    make(map[int]struct{}),
-		active:      nil,
+		// assigned:    make(map[int]struct{}),
+		assigned: make([]int, 0, maxAssigned),
+		active:   nil,
 	}
 }
 
@@ -55,25 +56,35 @@ func (p *pipeline) CanAssign() bool {
 
 func (p *pipeline) unassign(pieceID int) {
 	p.mu.Lock()
-	delete(p.assigned, pieceID)
-	p.mu.Unlock()
+	defer p.mu.Unlock()
+	if p.active != nil && p.active.pieceID == pieceID {
+		p.active = nil
+	}
+	for id, piece := range p.assigned {
+		if pieceID == piece {
+			p.assigned = append(p.assigned[:id], p.assigned[id+1:]...)
+			break
+		}
+	}
+	// delete(p.assigned, pieceID)
 }
 
-func (p *pipeline) assign(piece int) {
+func (p *pipeline) assign(pieceID int) {
 	if len(p.queue) < p.maxAssigned {
-		p.queue <- piece
-		p.assigned[piece] = struct{}{}
+		p.queue <- pieceID
+		// p.assigned[piece] = struct{}{}
+		p.assigned = append(p.assigned, pieceID)
 	}
 }
 
 func (p *pipeline) assignedPieces() []int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	pieces := make([]int, 0, len(p.assigned))
-	for piece := range p.assigned {
-		pieces = append(pieces, piece)
-	}
-	return pieces
+	// pieces := make([]int, 0, len(p.assigned))
+	// for piece := range p.assigned {
+	// 	pieces = append(pieces, piece)
+	// }
+	return p.assigned
 }
 
 func (p *pipeline) getActiveOrAssignNext() (int, bool) {
@@ -94,8 +105,8 @@ func (p *pipeline) assignNextLocked() (int, bool) {
 			return -1, false
 		}
 
-		p.nextBlock = 0
 		// p.active = piece
+		p.nextBlock = 0
 		p.active = &assignedPiece{pieceID: pieceID}
 
 		return pieceID, true

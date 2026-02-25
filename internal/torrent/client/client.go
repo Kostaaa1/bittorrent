@@ -115,7 +115,6 @@ func (c *Client) assignPiece(peer *peer.Peer, pieceID int) {
 func (c *Client) fillPeerPipeline(peer *peer.Peer) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
 	for peer.CanAssign() {
 		assigned := false
 		for pieceID := range c.unassigned {
@@ -143,7 +142,16 @@ func (c *Client) assignedPeer(pieceID int) *peer.Peer {
 }
 
 func (c *Client) collectResults(results <-chan peer.Result) {
+	// Accept the results from writer
+	// if piece failed (hash verification failed or write failed or whatever)
+	// - make it availble again for assignment (for client/scheduler)
+	// - and remove it from peer
 	for result := range results {
+		// find peer and remove it from assigned slice
+		// assign new pieces as long as peer can accept it
+		peer := c.assignedPeer(result.Index)
+		peer.UnassignPiece(result.Index)
+
 		if result.Err != nil {
 			c.log.Debug(
 				"[FAILED TO DOWNLOAD]",
@@ -158,15 +166,11 @@ func (c *Client) collectResults(results <-chan peer.Result) {
 				"piece_offset", result.Begin,
 				"piece_length", result.LenBlock,
 			)
-			// download success!
 			// increment the number of downloaded
 			c.announcer.IncDownloaded(uint64(result.LenBlock))
 			// update bitfield
 			c.Bitfield.SetPiece(result.Index)
-			// find peer and remove it from assigned slice
-			peer := c.assignedPeer(result.Index)
-			peer.UnassignPiece(result.Index)
-			// assign new pieces as long as peer can accept it
+			// assign
 			c.fillPeerPipeline(peer)
 			// notify/send have message to all peers that we have a piece
 			// c.NotifyPeers(result.Index)
@@ -212,7 +216,6 @@ func (c *Client) Run(ctx context.Context) {
 				c.fillPeerPipeline(peer)
 			}
 			peer.OnChoke = func(pieces []int) {
-				// Since peer is choking, we need to reassign its current pieces to another peer.
 				c.log.Info("OnChoke RAN", "free_pieces", pieces)
 				for _, piece := range pieces {
 					c.freePiece(piece)
