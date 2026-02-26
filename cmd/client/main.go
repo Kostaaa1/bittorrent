@@ -76,6 +76,7 @@ func newLogger() *slog.Logger {
 		},
 	}
 	f, _ := os.OpenFile("traffic.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	// f := os.Stdout
 	logger := slog.New(slog.NewTextHandler(f, opts))
 	slog.SetDefault(logger)
 	return logger

@@ -6,31 +6,29 @@ import (
 
 type assignedPiece struct {
 	pieceID int
-	// blocksToRequest []int
+	// pendingBlocks []int
 }
 
 // TODO:
 // if slow peer has dispatched requests, and peer does not send the pieces for those requests, there is no way of getting dispatched pieces back (they need to be reassigned). change data structure for pieces to []int.
 type pipeline struct {
-	windowSize  int
-	inflight    int
-	nextBlock   int
+	// boundaries
 	maxAssigned int
+	windowSize  int
+
+	inflight  int
+	nextBlock int
 	// current active piece that is being requested
 	active *assignedPiece
-	// used for assigning active/curr pieces
-	queue chan int
-	// when piece is received from peer, we delete from assigned
-	// if some period of time peer does not send the piece at all, we use this map to reassign the pieces to different peer.
+
+	queue    chan int
 	assigned []int
 	// if peer respond with piece that fails the hash verification, meaning that peer does not have valid piece, then we blacklist the piece so we cannot assign it to this peer again
 	// blacklist map[int]struct{}
 	mu sync.Mutex
 }
 
-func newPipeline() *pipeline {
-	windowSize := 10
-	maxAssigned := 10
+func newPipeline(windowSize, maxAssigned int) *pipeline {
 	return &pipeline{
 		windowSize:  windowSize,
 		maxAssigned: maxAssigned,

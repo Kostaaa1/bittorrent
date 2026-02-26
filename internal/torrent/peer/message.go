@@ -68,7 +68,7 @@ func (msg *Message) Bytes() []byte {
 	return buf
 }
 
-func ReadMessage(r io.Reader) (*Message, error) {
+func readMessage(r io.Reader) (*Message, error) {
 	var length uint32
 	if err := binary.Read(r, binary.BigEndian, &length); err != nil {
 		return nil, err
@@ -104,7 +104,7 @@ type PieceMessage struct {
 	Block []byte
 }
 
-func ParsePieceMessage(payload []byte) PieceMessage {
+func parsePieceMessage(payload []byte) PieceMessage {
 	index := binary.BigEndian.Uint32(payload[:4])
 	begin := binary.BigEndian.Uint32(payload[4:8])
 	block := make([]byte, len(payload[8:]))

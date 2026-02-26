@@ -211,12 +211,13 @@ func (c *Client) Run(ctx context.Context) {
 			}
 
 			peerID := atomic.AddUint64(&c.peerCounter, 1) - 1
+
 			peer := peer.New(peerID, conn, c.info, writerC, c.log)
 			peer.OnUnchoke = func() {
 				c.fillPeerPipeline(peer)
 			}
-			peer.OnChoke = func(pieces []int) {
-				c.log.Info("OnChoke RAN", "free_pieces", pieces)
+			peer.OnUnassign = func(pieces []int) {
+				c.log.Info("OnUnassign RAN", "free_pieces", pieces)
 				for _, piece := range pieces {
 					c.freePiece(piece)
 				}
