@@ -15,14 +15,11 @@ type pipeline struct {
 	// boundaries
 	maxAssigned int
 	windowSize  int
-
-	inflight  int
-	nextBlock int
-	// current active piece that is being requested
-	active *assignedPiece
-
-	queue    chan int
-	assigned []int
+	inflight    int
+	nextBlock   int
+	active      *assignedPiece
+	queue       chan int
+	assigned    []int
 	// if peer respond with piece that fails the hash verification, meaning that peer does not have valid piece, then we blacklist the piece so we cannot assign it to this peer again
 	// blacklist map[int]struct{}
 	mu sync.Mutex
@@ -41,16 +38,59 @@ func newPipeline(windowSize, maxAssigned int) *pipeline {
 	}
 }
 
-// func (p *pipeline) CanAssignPiece(pieceID int) bool {
-// 	p.mu.Lock()
-// 	_, ok := p.blacklist[pieceID]
-// 	p.mu.Unlock()
-// 	return !ok
-// }
-
 func (p *pipeline) CanAssign() bool {
 	return len(p.queue) < p.maxAssigned
 }
+
+func (p *pipeline) reassignPieces() []int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	l := len(p.assigned)
+	if l <= 1 {
+		return nil
+	}
+
+	reassignLen := l / 2
+	reassign := make([]int, reassignLen)
+
+	for i := 0; i < reassignLen; i++ {
+		piece := p.assigned[i]
+		reassign[i] = piece
+		// p.assigned = append(p.assigned[:i], p.assigned[i+1:]...)
+	}
+
+	return reassign
+}
+
+// reassign pieces to another peer.
+
+// func (p *pipeline) ReassignPieces() []int {
+// 	p.mu.Lock()
+// 	defer p.mu.Unlock()
+
+// 	l := len(p.assigned)
+// 	if l <= 1 {
+// 		return nil
+// 	}
+
+// 	reassignLen := l / 2
+// 	reassign := make([]int, reassignLen)
+
+// 	for i := 0; i < reassignLen; i++ {
+// 		piece := p.assigned[i]
+// 		reassign[i] = piece
+// 		// p.assigned = append(p.assigned[:i], p.assigned[i+1:]...)
+// 	}
+
+// 	return reassign
+// }
+
+// func (p *pipeline) unassignPieces(pieces []int) {
+// 	for _, piece := range pieces {
+// 		p.unassign(piece)
+// 	}
+// }
 
 func (p *pipeline) unassign(pieceID int) {
 	p.mu.Lock()
@@ -64,24 +104,20 @@ func (p *pipeline) unassign(pieceID int) {
 			break
 		}
 	}
-	// delete(p.assigned, pieceID)
 }
 
 func (p *pipeline) assign(pieceID int) {
 	if len(p.queue) < p.maxAssigned {
 		p.queue <- pieceID
-		// p.assigned[piece] = struct{}{}
+		p.mu.Lock()
 		p.assigned = append(p.assigned, pieceID)
+		p.mu.Unlock()
 	}
 }
 
 func (p *pipeline) assignedPieces() []int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	// pieces := make([]int, 0, len(p.assigned))
-	// for piece := range p.assigned {
-	// 	pieces = append(pieces, piece)
-	// }
 	return p.assigned
 }
 
@@ -102,11 +138,9 @@ func (p *pipeline) assignNextLocked() (int, bool) {
 			p.active = nil
 			return -1, false
 		}
-
 		// p.active = piece
 		p.nextBlock = 0
 		p.active = &assignedPiece{pieceID: pieceID}
-
 		return pieceID, true
 
 	default:

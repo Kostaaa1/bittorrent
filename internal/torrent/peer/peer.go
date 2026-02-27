@@ -43,6 +43,7 @@ type Peer struct {
 	OnUnassign            func(pieces []int)
 	OnUnchoke             func()
 	OnHandshake           func()
+	OnMissingPiece        func()
 }
 
 func New(
@@ -68,9 +69,11 @@ func (peer *Peer) canRequest() bool {
 	return peer.amInterested && !peer.peerChoking
 }
 
-func (peer *Peer) dispatchRequests() {
+var ErrFailedToassignNext = errors.New("failed to assign new piece")
+
+func (peer *Peer) dispatchRequests() error {
 	if !peer.canRequest() {
-		return
+		return nil
 	}
 
 	if peer.pipeline.inflight > 0 {
@@ -81,8 +84,7 @@ func (peer *Peer) dispatchRequests() {
 		index, ok := peer.pipeline.getActiveOrAssignNext()
 		if !ok {
 			// TODO: ask scheduler for new piece. split peer assiGned to half and assign then to this one
-			fmt.Println("failed to get current or assign next")
-			return
+			return ErrFailedToassignNext
 		}
 
 		block := peer.info.BlockSize
@@ -99,8 +101,7 @@ func (peer *Peer) dispatchRequests() {
 		if peer.pipeline.nextBlock >= blocksForPiece {
 			index, ok = peer.pipeline.assignNext()
 			if !ok {
-				fmt.Println("failed to get current or assign next")
-				return
+				return ErrFailedToassignNext
 			}
 			peer.log.Debug("[REASSIGNED]", "new_piece_for_requesting", index)
 		}
@@ -122,10 +123,12 @@ func (peer *Peer) dispatchRequests() {
 		peer.pipeline.inflight++
 		peer.pipeline.nextBlock++
 	}
+
+	return nil
 }
 
 func (peer *Peer) CanAssign() bool {
-	if peer.pipeline == nil {
+	if !peer.canRequest() {
 		return false
 	}
 	return peer.pipeline.CanAssign()
@@ -139,15 +142,13 @@ func (p *Peer) HasPiece(pieceID int) bool {
 }
 
 func (peer *Peer) AddPieceToQueue(pieceID int) {
-	peer.log.Debug("[ASSIGN]", "piece", pieceID, "peer", peer.conn.RemoteAddr())
+	peer.log.Debug("[ASSIGN]", "piece", pieceID)
 	peer.pipeline.assign(pieceID)
 }
 
 func (peer *Peer) UnassignPiece(pieceID int) {
-	if peer.pipeline != nil {
-		peer.log.Debug("[UNASSIGN]", "piece_index", pieceID)
-		peer.pipeline.unassign(pieceID)
-	}
+	peer.log.Debug("[UNASSIGN]", "piece_index", pieceID)
+	peer.pipeline.unassign(pieceID)
 }
 
 func (peer *Peer) AssignedPieces() []int {
@@ -155,6 +156,10 @@ func (peer *Peer) AssignedPieces() []int {
 		return nil
 	}
 	return peer.pipeline.assignedPieces()
+}
+
+func (peer *Peer) ReassignPieces() []int {
+	return peer.pipeline.reassignPieces()
 }
 
 func (p *Peer) Close() error {
@@ -172,12 +177,13 @@ func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 		return err
 	}
 
-	p.log.Info("[HANDSHAKE]", "status", "success", "peer", p.conn.RemoteAddr())
+	p.log.Info("[HANDSHAKE]", "status", "success")
 	if p.OnHandshake != nil {
 		p.OnHandshake()
 	}
 
-	p.conn.SetReadDeadline(time.Now().Add(time.Minute * 2))
+	read := false
+	p.conn.SetReadDeadline(time.Now().Add(time.Second * 45))
 
 	p.sendBitfield(b)
 	p.sendInterested()
@@ -215,6 +221,11 @@ func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 			return err
 		}
 
+		if !read {
+			p.conn.SetReadDeadline(time.Time{})
+			read = true
+		}
+
 		switch msg.ID {
 		case MsgChoke:
 			p.log.Debug("[CHOKE]")
@@ -223,11 +234,10 @@ func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 			}
 
 			p.peerChoking = true
+
 			if len(p.pipeline.assigned) > 0 {
 				ctx, cancel := context.WithCancel(context.Background())
 				cancelFunc = cancel
-
-				p.log.Debug("CALLING CHOKE TIMER")
 
 				go func() {
 					for {
@@ -244,6 +254,7 @@ func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 							p.pipeline.nextBlock = 0
 							p.pipeline.queue = nil
 							p.OnUnassign(pieces)
+							return
 						}
 					}
 				}()
@@ -256,7 +267,11 @@ func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 				cancelFunc()
 			}
 			p.OnUnchoke()
-			p.dispatchRequests()
+			if err := p.dispatchRequests(); err != nil {
+				if errors.Is(err, ErrFailedToassignNext) {
+					p.OnMissingPiece()
+				}
+			}
 		case MsgInterested:
 			p.log.Debug("[INTERESTED]")
 			p.peerInterested = true
@@ -308,7 +323,7 @@ func (p *Peer) initiateHandshake(hs Handshake) error {
 	}
 
 	if peerHandshake.InfoHash != hs.InfoHash {
-		return fmt.Errorf("handshake: info hashes do not match: %s", p.conn.RemoteAddr())
+		return fmt.Errorf("handshake: info hashes do not match: %s")
 	}
 
 	return nil

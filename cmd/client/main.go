@@ -27,6 +27,7 @@ func init() {
 		http.ListenAndServe("localhost:6060", nil)
 	}()
 }
+
 func main() {
 	if len(os.Args) <= 1 {
 		panic("input missing")
@@ -75,8 +76,8 @@ func newLogger() *slog.Logger {
 			return a
 		},
 	}
-	f, _ := os.OpenFile("traffic.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	// f := os.Stdout
+	// f, _ := os.OpenFile("traffic.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	f := os.Stdout
 	logger := slog.New(slog.NewTextHandler(f, opts))
 	slog.SetDefault(logger)
 	return logger
