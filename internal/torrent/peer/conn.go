@@ -40,8 +40,8 @@ func (p *Peer) SendHave(pieceID int) error {
 func (p *Peer) sendRequest(index, begin, block int) error {
 	p.log.Debug("[SEND - REQUEST]",
 		"piece", index,
-		"begin", begin,
 		"block", block,
+		"peer", p.Addr,
 	)
 	msg := make([]byte, 12)
 	binary.BigEndian.PutUint32(msg[:4], uint32(index))

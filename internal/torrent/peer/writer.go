@@ -17,13 +17,13 @@ type Result struct {
 }
 
 type pieceBuffer struct {
-	index  int
-	size   int
-	hash   [20]byte
-	buffer []byte
-	// blockOffsets []int
+	index       int
+	size        int
+	hash        [20]byte
+	buffer      []byte
 	totalBlocks int
 	blockCount  int
+	// blockOffsets []int
 }
 
 func (pb *pieceBuffer) verify() bool {
@@ -37,11 +37,6 @@ func (pb *pieceBuffer) writeBlock(begin int, block []byte) {
 	// pb.blockOffsets = append(pb.blockOffsets, begin)
 	// }
 }
-
-// func (pb *pieceBuffer) alloc() {
-// 	pb.blockOffsets = make([]int, 0, pb.totalBlocks)
-// 	pb.buffer = make([]byte, pb.size)
-// }
 
 type PieceWriter struct {
 	info       *torrent.TorrentInfo
@@ -89,9 +84,8 @@ func (pw *PieceWriter) newPieceBuffer(pieceID int) *pieceBuffer {
 		index:       pieceID,
 		hash:        pw.hashPieces[pieceID],
 		totalBlocks: blocks,
-		// blockOffsets: make([]int, blocks),
-		buffer: make([]byte, size),
-		size:   size,
+		buffer:      make([]byte, size),
+		size:        size,
 	}
 }
 

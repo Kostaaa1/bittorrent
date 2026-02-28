@@ -76,11 +76,11 @@ func (peer *Peer) dispatchRequests() error {
 		return nil
 	}
 
-	if peer.pipeline.inflight > 0 {
-		peer.pipeline.inflight--
-	}
+	// if peer.pipeline.inflight > 0 {
+	// 	peer.pipeline.inflight--
+	// }
 
-	for peer.pipeline.inflight < peer.pipeline.windowSize {
+	for len(peer.pipeline.inflight) < peer.pipeline.windowSize {
 		index, ok := peer.pipeline.getActiveOrAssignNext()
 		if !ok {
 			// TODO: ask scheduler for new piece. split peer assiGned to half and assign then to this one
@@ -103,7 +103,11 @@ func (peer *Peer) dispatchRequests() error {
 			if !ok {
 				return ErrFailedToassignNext
 			}
-			peer.log.Debug("[REASSIGNED]", "new_piece_for_requesting", index)
+			peer.log.Debug(
+				"[REASSIGNED]",
+				"new_piece_for_requesting", index,
+				"peer", peer.Addr,
+			)
 		}
 
 		begin := peer.pipeline.nextBlock * block
@@ -120,8 +124,9 @@ func (peer *Peer) dispatchRequests() error {
 		}
 
 		peer.sendRequest(index, begin, block)
-		peer.pipeline.inflight++
-		peer.pipeline.nextBlock++
+		peer.pipeline.addInflight(index)
+		// peer.pipeline.inflight++
+		// peer.pipeline.nextBlock++
 	}
 
 	return nil
@@ -142,12 +147,12 @@ func (p *Peer) HasPiece(pieceID int) bool {
 }
 
 func (peer *Peer) AddPieceToQueue(pieceID int) {
-	peer.log.Debug("[ASSIGN]", "piece", pieceID)
+	peer.log.Debug("[ASSIGN]", "piece", pieceID, "peer", peer.Addr)
 	peer.pipeline.assign(pieceID)
 }
 
 func (peer *Peer) UnassignPiece(pieceID int) {
-	peer.log.Debug("[UNASSIGN]", "piece_index", pieceID)
+	peer.log.Debug("[UNASSIGN]", "piece", pieceID, "peer", peer.Addr)
 	peer.pipeline.unassign(pieceID)
 }
 
@@ -169,15 +174,14 @@ func (p *Peer) Close() error {
 func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 	defer p.conn.Close()
 
-	p.log = slog.With("peer", p.conn.RemoteAddr())
-
 	if err := p.initiateHandshake(hs); err != nil {
 		p.log.Error("[HANDSHAKE]", "status", "failed", "error", err)
 		p.conn.Close()
 		return err
 	}
 
-	p.log.Info("[HANDSHAKE]", "status", "success")
+	p.log.Info("[HANDSHAKE]", "status", "success", "peer", p.Addr)
+
 	if p.OnHandshake != nil {
 		p.OnHandshake()
 	}
@@ -200,7 +204,6 @@ func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 	// }()
 
 	p.pipeline = newPipeline(10, 10)
-
 	var cancelFunc context.CancelFunc
 
 	for {
@@ -215,7 +218,7 @@ func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 			if errors.Is(err, io.EOF) {
 				return nil
 			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				p.log.Debug("[SLOW PEER]")
+				p.log.Debug("[SLOW PEER]", "peer", p.Addr)
 				return p.Close()
 			}
 			return err
@@ -228,7 +231,7 @@ func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 
 		switch msg.ID {
 		case MsgChoke:
-			p.log.Debug("[CHOKE]")
+			p.log.Debug("[CHOKE]", "peer", p.Addr)
 			if p.peerChoking {
 				continue
 			}
@@ -243,16 +246,17 @@ func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 					for {
 						select {
 						case <-ctx.Done():
-							p.log.Debug("UNCHOKED, canceled")
+							p.log.Debug("UNCHOKED, canceled", "peer", p.Addr)
 							return
 						case <-time.After(time.Second * 30):
-							p.log.Debug("TIME AFTER")
+							p.log.Debug("TIME AFTER", "peer", p.Addr)
 							pieces := p.AssignedPieces()
 							p.pipeline.active = nil
 							p.pipeline.assigned = nil
-							p.pipeline.inflight = 0
+							p.pipeline.inflight = nil
 							p.pipeline.nextBlock = 0
 							p.pipeline.queue = nil
+							// p.pipeline.inflight = 0
 							p.OnUnassign(pieces)
 							return
 						}
@@ -260,10 +264,10 @@ func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 				}()
 			}
 		case MsgUnchoke:
-			p.log.Debug("[UNCHOKE]")
+			p.log.Debug("[UNCHOKE]", "peer", p.Addr)
 			p.peerChoking = false
 			if cancelFunc != nil {
-				p.log.Debug("CANCELING CHOKE TIMEOUT")
+				p.log.Debug("CANCELING CHOKE TIMEOUT", "peer", p.Addr)
 				cancelFunc()
 			}
 			p.OnUnchoke()
@@ -273,33 +277,34 @@ func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 				}
 			}
 		case MsgInterested:
-			p.log.Debug("[INTERESTED]")
+			p.log.Debug("[INTERESTED]", "peer", p.Addr)
 			p.peerInterested = true
 			p.sendUnchoke()
 		case MsgUninterested:
-			p.log.Debug("[UNINTERESTED]")
+			p.log.Debug("[UNINTERESTED]", "peer", p.Addr)
 			p.peerInterested = false
 		case MsgBitfield:
-			p.log.Debug("[BITFIELD]")
+			p.log.Debug("[BITFIELD]", "peer", p.Addr)
 			p.bitfield = msg.Payload
 		case MsgRequest:
-			p.log.Debug("[REQUEST]")
+			p.log.Debug("[REQUEST]", "peer", p.Addr)
 		case MsgPiece:
 			piece := parsePieceMessage(msg.Payload)
 			p.log.Debug(
 				"[PIECE]",
 				"piece", piece.Index,
 				"begin", piece.Begin,
-				"len", len(piece.Block),
+				"peer", p.Addr,
 			)
 			p.writer <- piece
 			p.dispatchRequests()
+			p.pipeline.removeInflight(piece.Index)
 		case MsgHave:
-			p.log.Debug("[REQUEST]")
+			p.log.Debug("[REQUEST]", "peer", p.Addr)
 		case MsgCancel:
-			p.log.Debug("[CANCEL]")
+			p.log.Debug("[CANCEL]", "peer", p.Addr)
 		case MsgPort:
-			p.log.Debug("[PORT]")
+			p.log.Debug("[PORT]", "peer", p.Addr)
 		}
 	}
 }
