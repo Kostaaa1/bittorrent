@@ -40,7 +40,7 @@ func (p *Peer) SendHave(pieceID int) error {
 func (p *Peer) sendRequest(index, begin, block int) error {
 	p.log.Debug("[SEND - REQUEST]",
 		"piece", index,
-		"block", block,
+		"begin", begin,
 		"peer", p.Addr,
 	)
 	msg := make([]byte, 12)

@@ -15,9 +15,9 @@ type pipeline struct {
 	maxAssigned int
 	windowSize  int
 	nextBlock   int
-	inflight    map[int]struct{}
+	pending     map[int]struct{}
+	inflight    int
 	active      *assignedPiece
-	queue       chan int
 	assigned    []int
 	mu          sync.Mutex
 }
@@ -27,30 +27,39 @@ func newPipeline(windowSize, maxAssigned int) *pipeline {
 		windowSize:  windowSize,
 		maxAssigned: maxAssigned,
 		nextBlock:   0,
+		pending:     make(map[int]struct{}),
+		inflight:    0,
+
 		// assigned:    make(map[int]struct{}),
-		inflight: make(map[int]struct{}),
-		queue:    make(chan int, maxAssigned),
+		// queue:    make(chan int, maxAssigned),
+
 		assigned: make([]int, 0, maxAssigned),
 		active:   nil,
 	}
 }
 
-func (p *pipeline) addInflight(piece int) {
+func (p *pipeline) addPending(piece int) {
 	p.mu.Lock()
-	p.inflight[piece] = struct{}{}
+	p.pending[piece] = struct{}{}
 	p.mu.Unlock()
 }
 
-func (p *pipeline) removeInflight(piece int) {
+func (p *pipeline) canDispatch() bool {
 	p.mu.Lock()
-	if p.active.pieceID != piece {
-		delete(p.inflight, piece)
+	defer p.mu.Unlock()
+	return p.inflight < p.windowSize
+}
+
+func (p *pipeline) removePending(piece int) {
+	p.mu.Lock()
+	if p.active != nil && p.active.pieceID != piece {
+		delete(p.pending, piece)
 	}
 	p.mu.Unlock()
 }
 
 func (p *pipeline) CanAssign() bool {
-	return len(p.queue) < p.maxAssigned
+	return len(p.assigned) < p.maxAssigned
 }
 
 func (p *pipeline) reassignPieces() []int {
@@ -66,12 +75,12 @@ func (p *pipeline) reassignPieces() []int {
 	reassignLen := l / 2
 	reassign := make([]int, reassignLen)
 
-	for i, piece := range p.assigned {
+	for _, piece := range p.assigned {
 		if c == reassignLen {
 			break
 		}
-		if _, ok := p.inflight[piece]; !ok {
-			reassign[i] = piece
+		if _, ok := p.pending[piece]; !ok {
+			reassign[c] = piece
 			c++
 		}
 	}
@@ -95,13 +104,10 @@ func (p *pipeline) unassign(pieceID int) {
 	}
 }
 
-func (p *pipeline) assign(pieceID int) {
-	if len(p.queue) < p.maxAssigned {
-		p.queue <- pieceID
-		p.mu.Lock()
-		p.assigned = append(p.assigned, pieceID)
-		p.mu.Unlock()
-	}
+func (p *pipeline) assign(piece int) {
+	p.mu.Lock()
+	p.assigned = append(p.assigned, piece)
+	p.mu.Unlock()
 }
 
 func (p *pipeline) assignedPieces() []int {
@@ -120,23 +126,17 @@ func (p *pipeline) getActiveOrAssignNext() (int, bool) {
 }
 
 func (p *pipeline) assignNextLocked() (int, bool) {
-	select {
-	case pieceID, ok := <-p.queue:
-		if !ok {
-			// p.active = 0
-			p.active = nil
-			return -1, false
-		}
-		// p.active = piece
-		// p.nextBlock = 0
-		p.active = &assignedPiece{pieceID: pieceID}
-		return pieceID, true
-
-	default:
-		// p.hasActive = false
-		p.active = nil
+	if len(p.assigned) == 0 {
 		return -1, false
 	}
+	for _, piece := range p.assigned {
+		if p.active == nil || p.active.pieceID != piece {
+			p.nextBlock = 0
+			p.active = &assignedPiece{pieceID: piece}
+			return piece, true
+		}
+	}
+	return -1, false
 }
 
 func (p *pipeline) assignNext() (int, bool) {

@@ -76,11 +76,7 @@ func (peer *Peer) dispatchRequests() error {
 		return nil
 	}
 
-	// if peer.pipeline.inflight > 0 {
-	// 	peer.pipeline.inflight--
-	// }
-
-	for len(peer.pipeline.inflight) < peer.pipeline.windowSize {
+	for peer.pipeline.canDispatch() {
 		index, ok := peer.pipeline.getActiveOrAssignNext()
 		if !ok {
 			// TODO: ask scheduler for new piece. split peer assiGned to half and assign then to this one
@@ -89,7 +85,6 @@ func (peer *Peer) dispatchRequests() error {
 
 		block := peer.info.BlockSize
 		numOfPieces := peer.info.NumOfPieces
-
 		lastPieceID := numOfPieces - 1
 		blocksForPiece := peer.info.NumBlocksPerPiece
 
@@ -124,9 +119,9 @@ func (peer *Peer) dispatchRequests() error {
 		}
 
 		peer.sendRequest(index, begin, block)
-		peer.pipeline.addInflight(index)
-		// peer.pipeline.inflight++
-		// peer.pipeline.nextBlock++
+		peer.pipeline.addPending(index)
+		peer.pipeline.inflight++
+		peer.pipeline.nextBlock++
 	}
 
 	return nil
@@ -192,17 +187,6 @@ func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 	p.sendBitfield(b)
 	p.sendInterested()
 
-	// if p.keepAliveTickInterval == 0 {
-	// 	p.keepAliveTickInterval = time.Minute
-	// }
-	// ticker := time.NewTicker(p.keepAliveTickInterval)
-	// defer ticker.Stop()
-	// go func() {
-	// 	for range ticker.C {
-	// 		p.sendKeepAlive()
-	// 	}
-	// }()
-
 	p.pipeline = newPipeline(10, 10)
 	var cancelFunc context.CancelFunc
 
@@ -232,6 +216,7 @@ func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 		switch msg.ID {
 		case MsgChoke:
 			p.log.Debug("[CHOKE]", "peer", p.Addr)
+
 			if p.peerChoking {
 				continue
 			}
@@ -241,7 +226,6 @@ func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 			if len(p.pipeline.assigned) > 0 {
 				ctx, cancel := context.WithCancel(context.Background())
 				cancelFunc = cancel
-
 				go func() {
 					for {
 						select {
@@ -253,9 +237,9 @@ func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 							pieces := p.AssignedPieces()
 							p.pipeline.active = nil
 							p.pipeline.assigned = nil
-							p.pipeline.inflight = nil
 							p.pipeline.nextBlock = 0
-							p.pipeline.queue = nil
+							// p.pipeline.inflight = nil
+							// p.pipeline.queue = nil
 							// p.pipeline.inflight = 0
 							p.OnUnassign(pieces)
 							return
@@ -263,6 +247,7 @@ func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 					}
 				}()
 			}
+
 		case MsgUnchoke:
 			p.log.Debug("[UNCHOKE]", "peer", p.Addr)
 			p.peerChoking = false
@@ -298,7 +283,8 @@ func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 			)
 			p.writer <- piece
 			p.dispatchRequests()
-			p.pipeline.removeInflight(piece.Index)
+			p.pipeline.inflight--
+			p.pipeline.removePending(piece.Index)
 		case MsgHave:
 			p.log.Debug("[REQUEST]", "peer", p.Addr)
 		case MsgCancel:
