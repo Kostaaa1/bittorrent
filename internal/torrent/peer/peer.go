@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net"
 	"test/internal/torrent"
 	"time"
@@ -27,23 +26,26 @@ func (b Bitfield) SetPiece(index int) {
 }
 
 type Peer struct {
-	ID                    uint64
-	Addr                  string
-	conn                  net.Conn
-	bitfield              Bitfield
-	amChoking             bool
-	amInterested          bool
-	peerChoking           bool
-	peerInterested        bool
-	writer                chan<- PieceMessage
-	keepAliveTickInterval time.Duration
-	info                  *torrent.TorrentInfo
-	log                   *slog.Logger
-	pipeline              *pipeline
-	OnUnassign            func(pieces []int)
-	OnUnchoke             func()
-	OnHandshake           func()
-	OnMissingPiece        func()
+	ID   uint64
+	Addr string
+
+	conn           net.Conn
+	bitfield       Bitfield
+	amChoking      bool
+	amInterested   bool
+	peerChoking    bool
+	peerInterested bool
+	writer         chan<- PieceMessage
+	info           *torrent.TorrentInfo
+	log            *slog.Logger
+	pipeline       *pipeline
+	timeouts
+
+	// maybe use channels instead with scheduler.Type
+	OnUnassign     func(pieces []int)
+	OnUnchoke      func()
+	OnHandshake    func()
+	OnMissingPiece func()
 }
 
 func New(
@@ -65,66 +67,49 @@ func New(
 	}
 }
 
-func (peer *Peer) canRequest() bool {
-	return peer.amInterested && !peer.peerChoking
+type timeoutEvent struct {
+	occurred   time.Time
+	maxTimeout time.Duration
+	onExceed   func()
 }
 
-var ErrFailedToassignNext = errors.New("failed to assign new piece")
+type timeouts struct {
+	ticker time.Duration
+	events map[string]timeoutEvent
+}
 
-func (peer *Peer) dispatchRequests() error {
-	if !peer.canRequest() {
-		return nil
+func (t *timeouts) add(event string, te timeoutEvent) {
+	t.events[event] = te
+}
+func (t *timeouts) remove(event string) {
+	delete(t.events, event)
+}
+
+func (t *timeouts) run(ctx context.Context) {
+	ticker := time.NewTicker(t.ticker)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for name, event := range t.events {
+				// WHAT SHOULD HAPPEN ON EXCEED?
+				// clear timeout?
+				// remove from events?
+				// reset timestamp?
+				if time.Since(event.occurred) > event.maxTimeout {
+					event.onExceed()
+					delete(t.events, name)
+				}
+			}
+		}
 	}
+}
 
-	for peer.pipeline.canDispatch() {
-		index, ok := peer.pipeline.getActiveOrAssignNext()
-		if !ok {
-			// TODO: ask scheduler for new piece. split peer assiGned to half and assign then to this one
-			return ErrFailedToassignNext
-		}
-
-		block := peer.info.BlockSize
-		numOfPieces := peer.info.NumOfPieces
-		lastPieceID := numOfPieces - 1
-		blocksForPiece := peer.info.NumBlocksPerPiece
-
-		if index == lastPieceID {
-			size := peer.info.TotalLength - (lastPieceID * peer.info.PieceLength)
-			blocksForPiece = int(math.Ceil(float64(size) / float64(block)))
-		}
-
-		if peer.pipeline.nextBlock >= blocksForPiece {
-			index, ok = peer.pipeline.assignNext()
-			if !ok {
-				return ErrFailedToassignNext
-			}
-			peer.log.Debug(
-				"[REASSIGNED]",
-				"new_piece_for_requesting", index,
-				"peer", peer.Addr,
-			)
-		}
-
-		begin := peer.pipeline.nextBlock * block
-
-		if index == lastPieceID {
-			size := peer.info.TotalLength - (lastPieceID * peer.info.PieceLength)
-			remaining := size - begin
-			if remaining < 0 {
-				panic("TODO: REMAINING IS LESS THEN 0")
-			}
-			if remaining < block {
-				block = remaining
-			}
-		}
-
-		peer.sendRequest(index, begin, block)
-		peer.pipeline.addPending(index)
-		peer.pipeline.inflight++
-		peer.pipeline.nextBlock++
-	}
-
-	return nil
+func (peer *Peer) canRequest() bool {
+	return peer.amInterested && !peer.peerChoking
 }
 
 func (peer *Peer) CanAssign() bool {
@@ -134,11 +119,11 @@ func (peer *Peer) CanAssign() bool {
 	return peer.pipeline.CanAssign()
 }
 
-func (p *Peer) HasPiece(pieceID int) bool {
-	if p.bitfield == nil {
+func (peer *Peer) HasPiece(pieceID int) bool {
+	if peer.bitfield == nil {
 		return true
 	}
-	return p.bitfield.HasPiece(pieceID)
+	return peer.bitfield.HasPiece(pieceID)
 }
 
 func (peer *Peer) AddPieceToQueue(pieceID int) {
@@ -158,37 +143,50 @@ func (peer *Peer) AssignedPieces() []int {
 	return peer.pipeline.assignedPieces()
 }
 
-func (peer *Peer) ReassignPieces() []int {
-	return peer.pipeline.reassignPieces()
+func (peer *Peer) ReassignNPieces(n int) []int {
+	return peer.pipeline.ReassignNPieces(n)
 }
 
-func (p *Peer) Close() error {
-	return p.conn.Close()
+func (peer *Peer) Close() error {
+	return peer.conn.Close()
 }
 
-func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
-	defer p.conn.Close()
+func (peer *Peer) dispatchRequests(begin int) {
+	peer.pipeline.removePending(begin)
+	if peer.canRequest() {
+		if err := peer.pipeline.dispatch(); err != nil {
+			if errors.Is(err, ErrFailedToAssignNext) {
+				peer.OnMissingPiece()
+			}
+		}
+	}
+}
 
-	if err := p.initiateHandshake(hs); err != nil {
-		p.log.Error("[HANDSHAKE]", "status", "failed", "error", err)
-		p.conn.Close()
+func (peer *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
+	defer peer.conn.Close()
+
+	if err := peer.initiateHandshake(hs); err != nil {
+		peer.log.Error("[HANDSHAKE]", "status", "failed", "error", err)
+		peer.conn.Close()
 		return err
 	}
 
-	p.log.Info("[HANDSHAKE]", "status", "success", "peer", p.Addr)
+	peer.log.Info("[HANDSHAKE]", "status", "success", "peer", peer.Addr)
 
-	if p.OnHandshake != nil {
-		p.OnHandshake()
+	if peer.OnHandshake != nil {
+		peer.OnHandshake()
 	}
 
-	read := false
-	p.conn.SetReadDeadline(time.Now().Add(time.Second * 45))
+	peer.sendBitfield(b)
+	peer.sendInterested()
 
-	p.sendBitfield(b)
-	p.sendInterested()
+	peer.pipeline = newPipeline(10, 10, peer.info,
+		func(piece, begin, block int) {
+			peer.sendRequest(piece, begin, block)
+		},
+	)
 
-	p.pipeline = newPipeline(10, 10)
-	var cancelFunc context.CancelFunc
+	timeouts := new(timeouts)
 
 	for {
 		select {
@@ -197,145 +195,123 @@ func (p *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 		default:
 		}
 
-		msg, err := readMessage(p.conn)
+		msg, err := readMessage(peer.conn)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return nil
 			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				p.log.Debug("[SLOW PEER]", "peer", p.Addr)
-				return p.Close()
+				peer.log.Debug("[SLOW PEER]", "peer", peer.Addr)
+				return peer.Close()
 			}
 			return err
 		}
 
-		if !read {
-			p.conn.SetReadDeadline(time.Time{})
-			read = true
-		}
-
 		switch msg.ID {
 		case MsgChoke:
-			p.log.Debug("[CHOKE]", "peer", p.Addr)
+			peer.log.Debug("[CHOKE]", "peer", peer.Addr)
 
-			if p.peerChoking {
+			if peer.peerChoking {
 				continue
 			}
 
-			p.peerChoking = true
+			peer.peerChoking = true
 
-			if len(p.pipeline.assigned) > 0 {
-				ctx, cancel := context.WithCancel(context.Background())
-				cancelFunc = cancel
-				go func() {
-					for {
-						select {
-						case <-ctx.Done():
-							p.log.Debug("UNCHOKED, canceled", "peer", p.Addr)
-							return
-						case <-time.After(time.Second * 30):
-							p.log.Debug("TIME AFTER", "peer", p.Addr)
-							pieces := p.AssignedPieces()
-							p.pipeline.active = nil
-							p.pipeline.assigned = nil
-							p.pipeline.nextBlock = 0
-							// p.pipeline.inflight = nil
-							// p.pipeline.queue = nil
-							// p.pipeline.inflight = 0
-							p.OnUnassign(pieces)
-							return
-						}
-					}
-				}()
+			if len(peer.pipeline.assigned) > 0 {
+				timeouts.add("CHOKE", timeoutEvent{
+					occurred:   time.Now(),
+					maxTimeout: time.Second * 45,
+					onExceed: func() {
+						pieces := peer.pipeline.drain()
+						peer.OnUnassign(pieces)
+					},
+				})
 			}
 
 		case MsgUnchoke:
-			p.log.Debug("[UNCHOKE]", "peer", p.Addr)
-			p.peerChoking = false
-			if cancelFunc != nil {
-				p.log.Debug("CANCELING CHOKE TIMEOUT", "peer", p.Addr)
-				cancelFunc()
-			}
-			p.OnUnchoke()
-			if err := p.dispatchRequests(); err != nil {
-				if errors.Is(err, ErrFailedToassignNext) {
-					p.OnMissingPiece()
+			peer.log.Debug("[UNCHOKE]", "peer", peer.Addr)
+			peer.peerChoking = false
+			peer.OnUnchoke()
+			timeouts.remove("CHOKE")
+			if peer.canRequest() {
+				if err := peer.pipeline.dispatch(); err != nil {
+					if errors.Is(err, ErrFailedToAssignNext) {
+						peer.OnMissingPiece()
+					}
 				}
 			}
 		case MsgInterested:
-			p.log.Debug("[INTERESTED]", "peer", p.Addr)
-			p.peerInterested = true
-			p.sendUnchoke()
+			peer.log.Debug("[INTERESTED]", "peer", peer.Addr)
+			peer.peerInterested = true
+			peer.sendUnchoke()
 		case MsgUninterested:
-			p.log.Debug("[UNINTERESTED]", "peer", p.Addr)
-			p.peerInterested = false
+			peer.log.Debug("[UNINTERESTED]", "peer", peer.Addr)
+			peer.peerInterested = false
 		case MsgBitfield:
-			p.log.Debug("[BITFIELD]", "peer", p.Addr)
-			p.bitfield = msg.Payload
+			peer.log.Debug("[BITFIELD]", "peer", peer.Addr)
+			peer.bitfield = msg.Payload
 		case MsgRequest:
-			p.log.Debug("[REQUEST]", "peer", p.Addr)
+			peer.log.Debug("[REQUEST]", "peer", peer.Addr)
 		case MsgPiece:
 			piece := parsePieceMessage(msg.Payload)
-			p.log.Debug(
+			peer.log.Debug(
 				"[PIECE]",
 				"piece", piece.Index,
 				"begin", piece.Begin,
-				"peer", p.Addr,
+				"peer", peer.Addr,
 			)
-			p.writer <- piece
-			p.dispatchRequests()
-			p.pipeline.inflight--
-			p.pipeline.removePending(piece.Index)
+			peer.writer <- piece
+			peer.dispatchRequests(piece.Begin)
 		case MsgHave:
-			p.log.Debug("[REQUEST]", "peer", p.Addr)
+			peer.log.Debug("[REQUEST]", "peer", peer.Addr)
 		case MsgCancel:
-			p.log.Debug("[CANCEL]", "peer", p.Addr)
+			peer.log.Debug("[CANCEL]", "peer", peer.Addr)
 		case MsgPort:
-			p.log.Debug("[PORT]", "peer", p.Addr)
+			peer.log.Debug("[PORT]", "peer", peer.Addr)
 		}
 	}
 }
 
-func (p *Peer) initiateHandshake(hs Handshake) error {
-	_, err := p.conn.Write(hs.Bytes())
+func (peer *Peer) initiateHandshake(hs Handshake) error {
+	_, err := peer.conn.Write(hs.Bytes())
 	if err != nil {
-		return fmt.Errorf("failed to write handshake: %v", err)
+		return fmt.Errorf("failed handshake: write: %v", err)
 	}
 
-	peerHandshake, err := ReadHandshake(p.conn)
+	peerHandshake, err := ReadHandshake(peer.conn)
 	if err != nil {
-		return fmt.Errorf("failed to read handshake: %v", err)
+		return fmt.Errorf("failed handhskae: read: %v", err)
 	}
 
 	pp := string(peerHandshake.Pstr)
 	hp := string(hs.Pstr)
 
 	if hp != pp {
-		return fmt.Errorf("handshake: protocol strings do not match: clients=%s, peers=%s", hp, pp)
+		return fmt.Errorf("failed handshake: protocol strings do not match: clients=%s, peers=%s", hp, pp)
 	}
 
 	if peerHandshake.InfoHash != hs.InfoHash {
-		return fmt.Errorf("handshake: info hashes do not match: %s")
+		return fmt.Errorf("failed handshake: info hashes do not match: %s", peer.Addr)
 	}
 
 	return nil
 }
 
-func (p *Peer) Print() {
-	if p.pipeline != nil {
-		p.log.Info(
-			"[PEER]",
-			"addr", p.Addr,
-			"id", p.ID,
-			"pipeline.inflight", p.pipeline.inflight,
-			"pipeline.active", p.pipeline.active,
-			"pipeline.len_assigned_pieces", len(p.pipeline.assigned),
-			"pipeline.assigned_pieces", p.pipeline.assigned,
-		)
-	} else {
-		p.log.Info(
-			"[PEER]",
-			"addr", p.Addr,
-			"id", p.ID,
-		)
-	}
-}
+// func (peer *Peer) Print() {
+// 	if peer.pipeline != nil {
+// 		peer.log.Info(
+// 			"[PEER]",
+// 			"addr", peer.Addr,
+// 			"id", peer.ID,
+// 			"pipeline.pending", len(peer.pipeline.pending),
+// 			"pipeline.active", peer.pipeline.active,
+// 			"pipeline.len_assigned_pieces", len(peer.pipeline.assigned),
+// 			"pipeline.assigned_pieces", peer.pipeline.assigned,
+// 		)
+// 	} else {
+// 		peer.log.Info(
+// 			"[PEER]",
+// 			"addr", peer.Addr,
+// 			"id", peer.ID,
+// 		)
+// 	}
+// }

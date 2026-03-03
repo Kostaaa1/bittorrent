@@ -3,7 +3,6 @@ package client
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net"
 	"slices"
@@ -284,7 +283,6 @@ func (c *Client) Run(ctx context.Context) {
 	go c.announcer.Run(ctx)
 	go c.writer.Run()
 	go c.collectResults(resultC)
-	// go c.printPeers()
 
 	var peerSem chan struct{}
 	if c.maxConnectedPeers > 0 {
@@ -305,7 +303,6 @@ func (c *Client) Run(ctx context.Context) {
 			}
 
 			peerID := atomic.AddUint64(&c.peerCounter, 1) - 1
-
 			peer := peer.New(peerID, conn, c.info, writerC, c.log)
 
 			peer.OnHandshake = func() {
@@ -335,18 +332,18 @@ func (c *Client) Run(ctx context.Context) {
 	}
 }
 
-func (c *Client) printPeers() {
-	ticker := time.NewTicker(time.Second * 30)
-	for range ticker.C {
-		c.mu.Lock()
-		peers := c.peers
-		fmt.Println("ACTIVE PEER CONNECTIONS", len(peers))
-		for _, peer := range peers {
-			peer.Print()
-		}
-		c.mu.Unlock()
-	}
-}
+// func (c *Client) printPeers() {
+// 	ticker := time.NewTicker(time.Second * 30)
+// 	for range ticker.C {
+// 		c.mu.Lock()
+// 		peers := c.peers
+// 		fmt.Println("ACTIVE PEER CONNECTIONS", len(peers))
+// 		for _, peer := range peers {
+// 			peer.Print()
+// 		}
+// 		c.mu.Unlock()
+// 	}
+// }
 
 // func (c *Client) NotifyPeers(pieceID int) {
 // 	c.mu.Lock()

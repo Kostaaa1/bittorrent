@@ -1,7 +1,11 @@
 package peer
 
 import (
+	"errors"
+	"math"
 	"sync"
+	"test/internal/torrent"
+	"time"
 )
 
 type assignedPiece struct {
@@ -12,71 +16,71 @@ type assignedPiece struct {
 // TODO:
 // if slow peer has dispatched requests, and peer does not send the pieces for those requests, there is no way of getting dispatched pieces back (they need to be reassigned). change data structure for pieces to []int.
 type pipeline struct {
+	mu          sync.Mutex
 	maxAssigned int
 	windowSize  int
-	nextBlock   int
-	pending     map[int]struct{}
-	inflight    int
-	active      *assignedPiece
-	assigned    []int
-	mu          sync.Mutex
+	info        *torrent.TorrentInfo
+
+	nextBlock  int
+	assigned   []int
+	pending    map[int]time.Time
+	active     *assignedPiece
+	onDispatch func(piece, begin, block int)
 }
 
-func newPipeline(windowSize, maxAssigned int) *pipeline {
+func newPipeline(
+	windowSize,
+	maxAssigned int,
+	info *torrent.TorrentInfo,
+	fn func(piece, begin, block int),
+) *pipeline {
 	return &pipeline{
 		windowSize:  windowSize,
 		maxAssigned: maxAssigned,
 		nextBlock:   0,
-		pending:     make(map[int]struct{}),
-		inflight:    0,
-
-		// assigned:    make(map[int]struct{}),
-		// queue:    make(chan int, maxAssigned),
-
-		assigned: make([]int, 0, maxAssigned),
-		active:   nil,
+		pending:     make(map[int]time.Time),
+		assigned:    make([]int, 0, maxAssigned),
+		active:      nil,
+		info:        info,
+		onDispatch:  fn,
 	}
 }
 
 func (p *pipeline) addPending(piece int) {
 	p.mu.Lock()
-	p.pending[piece] = struct{}{}
+	p.pending[piece] = time.Now()
+	p.mu.Unlock()
+}
+
+func (p *pipeline) removePending(piece int) {
+	p.mu.Lock()
+	delete(p.pending, piece)
 	p.mu.Unlock()
 }
 
 func (p *pipeline) canDispatch() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.inflight < p.windowSize
-}
-
-func (p *pipeline) removePending(piece int) {
-	p.mu.Lock()
-	if p.active != nil && p.active.pieceID != piece {
-		delete(p.pending, piece)
-	}
-	p.mu.Unlock()
+	return len(p.pending) < p.windowSize
 }
 
 func (p *pipeline) CanAssign() bool {
 	return len(p.assigned) < p.maxAssigned
 }
 
-func (p *pipeline) reassignPieces() []int {
+func (p *pipeline) ReassignNPieces(n int) []int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	l := len(p.assigned)
-	if l <= 1 {
+	if len(p.assigned) <= n {
 		return nil
 	}
 
 	c := 0
-	reassignLen := l / 2
-	reassign := make([]int, reassignLen)
 
+	reassign := make([]int, n)
 	for _, piece := range p.assigned {
-		if c == reassignLen {
+		if c == n {
 			break
 		}
 		if _, ok := p.pending[piece]; !ok {
@@ -116,6 +120,20 @@ func (p *pipeline) assignedPieces() []int {
 	return p.assigned
 }
 
+func (p *pipeline) drain() []int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.active = nil
+	p.pending = nil
+	p.nextBlock = 0
+	p.onDispatch = nil
+	assigned := p.assigned
+	p.assigned = nil
+
+	return assigned
+}
+
 func (p *pipeline) getActiveOrAssignNext() (int, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -143,4 +161,51 @@ func (p *pipeline) assignNext() (int, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.assignNextLocked()
+}
+
+var ErrFailedToAssignNext = errors.New("failed to assign new piece")
+
+func (p *pipeline) dispatch() error {
+	for p.canDispatch() {
+		index, ok := p.getActiveOrAssignNext()
+		if !ok {
+			return ErrFailedToAssignNext
+		}
+
+		block := p.info.BlockSize
+		numOfPieces := p.info.NumOfPieces
+		lastPieceID := numOfPieces - 1
+		blocksForPiece := p.info.NumBlocksPerPiece
+
+		if index == lastPieceID {
+			size := p.info.TotalLength - (lastPieceID * p.info.PieceLength)
+			blocksForPiece = int(math.Ceil(float64(size) / float64(block)))
+		}
+
+		if p.nextBlock >= blocksForPiece {
+			index, ok = p.assignNext()
+			if !ok {
+				return ErrFailedToAssignNext
+			}
+		}
+
+		begin := p.nextBlock * block
+
+		if index == lastPieceID {
+			size := p.info.TotalLength - (lastPieceID * p.info.PieceLength)
+			remaining := size - begin
+			if remaining < 0 {
+				panic("TODO: REMAINING IS LESS THEN 0")
+			}
+			if remaining < block {
+				block = remaining
+			}
+		}
+
+		p.nextBlock++
+		p.addPending(begin)
+		p.onDispatch(index, begin, block)
+	}
+
+	return nil
 }
