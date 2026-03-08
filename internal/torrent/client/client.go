@@ -63,19 +63,19 @@ func New(
 	)
 
 	return &Client{
-		ID:          clientID,
-		Port:        port,
-		Bitfield:    make([]byte, (len(pieces)+7)/8),
-		assigned:    make(map[int]uint64),
-		peers:       make([]*peer.Peer, 0),
-		unassigned:  unassigned,
-		writer:      writer,
-		announcer:   announcer,
-		peerCh:      peerCh,
-		peerCounter: 0,
-		info:        info,
-		log:         log,
-		// maxConnectedPeers: 2,
+		ID:                clientID,
+		Port:              port,
+		Bitfield:          make([]byte, (len(pieces)+7)/8),
+		assigned:          make(map[int]uint64),
+		peers:             make([]*peer.Peer, 0),
+		unassigned:        unassigned,
+		writer:            writer,
+		announcer:         announcer,
+		peerCh:            peerCh,
+		peerCounter:       0,
+		info:              info,
+		log:               log,
+		maxConnectedPeers: 2,
 	}
 }
 
@@ -234,13 +234,7 @@ func (c *Client) assignedPeer(pieceID int) *peer.Peer {
 }
 
 func (c *Client) collectResults(results <-chan peer.Result) {
-	// Accept the results from writer
-	// if piece failed (hash verification failed or write failed or whatever)
-	// - make it availble again for assignment (for client/scheduler)
-	// - and remove it from peer
 	for result := range results {
-		// find peer and remove it from assigned slice
-		// assign new pieces as long as peer can accept it
 		peer := c.assignedPeer(result.Index)
 		peer.UnassignPiece(result.Index)
 

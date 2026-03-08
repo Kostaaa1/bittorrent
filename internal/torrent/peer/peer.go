@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"test/internal/torrent"
-	"time"
 )
 
 type Bitfield []byte
@@ -39,7 +38,6 @@ type Peer struct {
 	info           *torrent.TorrentInfo
 	log            *slog.Logger
 	pipeline       *pipeline
-	timeouts
 
 	// maybe use channels instead with scheduler.Type
 	OnUnassign     func(pieces []int)
@@ -67,47 +65,6 @@ func New(
 	}
 }
 
-type timeoutEvent struct {
-	occurred   time.Time
-	maxTimeout time.Duration
-	onExceed   func()
-}
-
-type timeouts struct {
-	ticker time.Duration
-	events map[string]timeoutEvent
-}
-
-func (t *timeouts) add(event string, te timeoutEvent) {
-	t.events[event] = te
-}
-func (t *timeouts) remove(event string) {
-	delete(t.events, event)
-}
-
-func (t *timeouts) run(ctx context.Context) {
-	ticker := time.NewTicker(t.ticker)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			for name, event := range t.events {
-				// WHAT SHOULD HAPPEN ON EXCEED?
-				// clear timeout?
-				// remove from events?
-				// reset timestamp?
-				if time.Since(event.occurred) > event.maxTimeout {
-					event.onExceed()
-					delete(t.events, name)
-				}
-			}
-		}
-	}
-}
-
 func (peer *Peer) canRequest() bool {
 	return peer.amInterested && !peer.peerChoking
 }
@@ -127,13 +84,22 @@ func (peer *Peer) HasPiece(pieceID int) bool {
 }
 
 func (peer *Peer) AddPieceToQueue(pieceID int) {
-	peer.log.Debug("[ASSIGN]", "piece", pieceID, "peer", peer.Addr)
 	peer.pipeline.assign(pieceID)
+	peer.log.Debug(
+		"[ASSIGN]",
+		"piece", pieceID,
+		"peer", peer.Addr,
+		"assigned", peer.pipeline.assigned,
+	)
 }
 
 func (peer *Peer) UnassignPiece(pieceID int) {
-	peer.log.Debug("[UNASSIGN]", "piece", pieceID, "peer", peer.Addr)
 	peer.pipeline.unassign(pieceID)
+	peer.log.Debug("[UNASSIGN]",
+		"piece", pieceID,
+		"peer", peer.Addr,
+		"assigned", peer.pipeline.assigned,
+	)
 }
 
 func (peer *Peer) AssignedPieces() []int {
@@ -186,8 +152,6 @@ func (peer *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 		},
 	)
 
-	timeouts := new(timeouts)
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -217,21 +181,12 @@ func (peer *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 			peer.peerChoking = true
 
 			if len(peer.pipeline.assigned) > 0 {
-				timeouts.add("CHOKE", timeoutEvent{
-					occurred:   time.Now(),
-					maxTimeout: time.Second * 45,
-					onExceed: func() {
-						pieces := peer.pipeline.drain()
-						peer.OnUnassign(pieces)
-					},
-				})
 			}
 
 		case MsgUnchoke:
 			peer.log.Debug("[UNCHOKE]", "peer", peer.Addr)
 			peer.peerChoking = false
 			peer.OnUnchoke()
-			timeouts.remove("CHOKE")
 			if peer.canRequest() {
 				if err := peer.pipeline.dispatch(); err != nil {
 					if errors.Is(err, ErrFailedToAssignNext) {

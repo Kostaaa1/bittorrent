@@ -20,12 +20,11 @@ type pipeline struct {
 	maxAssigned int
 	windowSize  int
 	info        *torrent.TorrentInfo
-
-	nextBlock  int
-	assigned   []int
-	pending    map[int]time.Time
-	active     *assignedPiece
-	onDispatch func(piece, begin, block int)
+	nextBlock   int
+	assigned    []int
+	pending     map[int]time.Time
+	active      *assignedPiece
+	onDispatch  func(piece, begin, block int)
 }
 
 func newPipeline(
@@ -95,11 +94,9 @@ func (p *pipeline) ReassignNPieces(n int) []int {
 func (p *pipeline) unassign(pieceID int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
 	if p.active != nil && p.active.pieceID == pieceID {
 		p.active = nil
 	}
-
 	for id, piece := range p.assigned {
 		if pieceID == piece {
 			p.assigned = append(p.assigned[:id], p.assigned[id+1:]...)
