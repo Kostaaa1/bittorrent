@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"test/internal/torrent"
+	"time"
 )
 
 type Bitfield []byte
@@ -38,7 +39,7 @@ type Peer struct {
 	info           *torrent.TorrentInfo
 	log            *slog.Logger
 	pipeline       *pipeline
-
+	tm             *timeoutManager
 	// maybe use channels instead with scheduler.Type
 	OnUnassign     func(pieces []int)
 	OnUnchoke      func()
@@ -58,6 +59,7 @@ func New(
 		Addr:         conn.RemoteAddr().String(),
 		info:         info,
 		conn:         conn,
+		tm:           newTimeoutManager(),
 		amInterested: false,
 		peerChoking:  true,
 		writer:       w,
@@ -152,6 +154,8 @@ func (peer *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 		},
 	)
 
+	go peer.tm.run(ctx, time.Second)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -181,11 +185,24 @@ func (peer *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 			peer.peerChoking = true
 
 			if len(peer.pipeline.assigned) > 0 {
+				peer.tm.add(MsgChoke, chokeTimeout, func() {
+					// when specified timeout exceeds, we need to reassign pieces to scheduler
+					// if len(peer.pipeline.assigned) == 0 {
+					// 	return
+					// }
+					// panic("YOOOOOOOO")
+					// clear pipeline
+					// go func() {
+					peer.log.Debug("CHOKE TIMEOUT EXCEEDED!!!!!!!!!")
+					peer.OnUnassign(peer.pipeline.drain())
+					// }()
+				})
 			}
 
 		case MsgUnchoke:
 			peer.log.Debug("[UNCHOKE]", "peer", peer.Addr)
 			peer.peerChoking = false
+			peer.tm.cancel(MsgChoke)
 			peer.OnUnchoke()
 			if peer.canRequest() {
 				if err := peer.pipeline.dispatch(); err != nil {

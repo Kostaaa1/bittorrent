@@ -15,22 +15,26 @@ import (
 )
 
 type Client struct {
-	ID                   [20]byte
-	Port                 uint16
-	Bitfield             peer.Bitfield
-	assigned             map[int]uint64
-	unassigned           map[int]struct{}
-	peers                []*peer.Peer
-	mu                   sync.Mutex
-	writer               *peer.PieceWriter
-	announcer            *tracker.Announcer
-	info                 *torrent.TorrentInfo
-	peerCh               chan tracker.PeerAddress
-	peerCounter          uint64
+	ID       [20]byte
+	Port     uint16
+	Bitfield peer.Bitfield
+
+	assigned   map[int]uint64
+	unassigned map[int]struct{}
+
+	writer    *peer.PieceWriter
+	announcer *tracker.Announcer
+	info      *torrent.TorrentInfo
+
 	maxGlobalConnections int
 	maxConnectedPeers    int
 	maxHalfOpen          int
 	log                  *slog.Logger
+	// peer
+	peers       []*peer.Peer
+	peerCh      chan tracker.PeerAddress
+	peerCounter uint64
+	mu          sync.Mutex
 }
 
 func New(
@@ -51,6 +55,7 @@ func New(
 	peerCh := make(chan tracker.PeerAddress)
 
 	writer := peer.NewPieceWriter(info, pieces, files)
+
 	announcer := tracker.NewAnnouncer(
 		info.InfoHash,
 		clientID,
@@ -63,26 +68,26 @@ func New(
 	)
 
 	return &Client{
-		ID:                clientID,
-		Port:              port,
-		Bitfield:          make([]byte, (len(pieces)+7)/8),
-		assigned:          make(map[int]uint64),
-		peers:             make([]*peer.Peer, 0),
-		unassigned:        unassigned,
-		writer:            writer,
-		announcer:         announcer,
-		peerCh:            peerCh,
-		peerCounter:       0,
-		info:              info,
-		log:               log,
-		maxConnectedPeers: 2,
+		ID:          clientID,
+		Port:        port,
+		Bitfield:    make([]byte, (len(pieces)+7)/8),
+		assigned:    make(map[int]uint64),
+		unassigned:  unassigned,
+		peers:       make([]*peer.Peer, 0),
+		writer:      writer,
+		announcer:   announcer,
+		peerCh:      peerCh,
+		peerCounter: 0,
+		info:        info,
+		log:         log,
+		// maxConnectedPeers: 2,
 	}
 }
 
 func (c *Client) addPeer(peer *peer.Peer) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.peers = append(c.peers, peer)
-	c.mu.Unlock()
 }
 
 // removes peer from slice of peers and reassign pieces
@@ -99,28 +104,29 @@ func (c *Client) removePeer(target *peer.Peer) {
 	}
 }
 
-func (c *Client) unassign(pieceID int) {
+func (c *Client) unassign(piece int) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.assigned, pieceID)
-	c.unassigned[pieceID] = struct{}{}
+	delete(c.assigned, piece)
+	c.unassigned[piece] = struct{}{}
+	c.mu.Unlock()
 }
 
-func (c *Client) assign(peer *peer.Peer, pieceID int) bool {
+func (c *Client) assign(peer *peer.Peer, piece int) bool {
 	if !peer.CanAssign() {
 		return false
 	}
-	delete(c.unassigned, pieceID)
-	c.assigned[pieceID] = peer.ID
-	peer.AddPieceToQueue(pieceID)
+
+	peer.AddPieceToQueue(piece)
+
+	delete(c.unassigned, piece)
+	c.assigned[piece] = peer.ID
+
 	return true
 }
 
-func (c *Client) assignPieces(peer *peer.Peer, pieces []int) {
-	c.mu.Lock()
-	defer c.mu.Lock()
+func (c *Client) unassignPieces(pieces []int) {
 	for _, piece := range pieces {
-		c.assign(peer, piece)
+		c.unassign(piece)
 	}
 }
 
@@ -144,8 +150,8 @@ func (c *Client) rearrangePieces(skip *peer.Peer, pieces []int) error {
 
 		for i := 0; i < totalPeers; i++ {
 			idx := (lastPeerID + i) % totalPeers
-			peer := c.peers[idx]
 
+			peer := c.peers[idx]
 			if skip != nil && skip.ID == peer.ID {
 				continue
 			}
@@ -164,6 +170,15 @@ func (c *Client) rearrangePieces(skip *peer.Peer, pieces []int) error {
 	return nil
 }
 
+func (c *Client) fillPipelineFromPeers(target *peer.Peer) {
+	// get the amount that peer can accept
+	// find slowest peer and reassign its pieces to the target
+	// assign pieces as long as target can accept and available peers
+}
+
+func (c *Client) fillPipelineFromUnassigned(target *peer.Peer) {
+}
+
 // Fills peers request pipeline as long as peer can accept the new piece to request.
 // assign pieces from map if there are any
 // otherwise, take portion of pieces from other peers
@@ -172,51 +187,60 @@ func (c *Client) fillPeerPipeline(target *peer.Peer) {
 		return
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	for target.CanAssign() {
+		var pieceID int
+		var found bool
 
-	if len(c.unassigned) > 0 {
-		for target.CanAssign() {
-			assigned := false
-			for pieceID := range c.unassigned {
-				if target.HasPiece(pieceID) {
-					c.assign(target, pieceID)
-					assigned = true
-					break
-				}
-			}
-			if !assigned {
-				break
-			}
+		c.mu.Lock()
+		for id := range c.unassigned {
+			pieceID = id
+			found = true
+			break
 		}
-	} else {
-		c.log.Info("[UNASSIGNING FROM OTHER PEERS]")
+		c.mu.Unlock()
 
-		// for _, peer := range c.peers {
-		// 	if !target.CanAssign() {
-		// 		break
-		// 	}
-		// 	if peer.ID != target.ID {
-		// 		newpieces := peer.ReassignPieces()
-		// 		unassign := make([]int, 0)
-		// 		c.log.Debug("[REASSIGNING PIECES]", "pieces", newpieces)
-		// 		for _, piece := range newpieces {
-		// 			if !target.HasPiece(piece) {
-		// 				continue
-		// 			}
-		// 			if assigned := c.assign(target, piece); assigned {
-		// 				c.log.Debug("I GUESS ASSIGNIGN", peer.Addr, piece)
-		// 				unassign = append(unassign, piece)
-		// 			}
-		// 		}
-		// 		if len(unassign) > 0 {
-		// 			for _, piece := range unassign {
-		// 				peer.UnassignPiece(piece)
-		// 			}
-		// 		}
-		// 	}
-		// }
+		if !found {
+			// Ask other peers for portion of their pieces and then reassign it to target
+			c.log.Info("[UNASSIGNING FROM OTHER PEERS]")
+
+			// for _, peer := range c.peers {
+			// 	if !target.CanAssign() {
+			// 		break
+			// 	}
+			// 	if peer.ID != target.ID {
+			// 		newpieces := peer.ReassignPieces()
+			// 		unassign := make([]int, 0)
+			// 		c.log.Debug("[REASSIGNING PIECES]", "pieces", newpieces)
+			// 		for _, piece := range newpieces {
+			// 			if !target.HasPiece(piece) {
+			// 				continue
+			// 			}
+			// 			if assigned := c.assign(target, piece); assigned {
+			// 				c.log.Debug("I GUESS ASSIGNIGN", peer.Addr, piece)
+			// 				unassign = append(unassign, piece)
+			// 			}
+			// 		}
+			// 		if len(unassign) > 0 {
+			// 			for _, piece := range unassign {
+			// 				peer.UnassignPiece(piece)
+			// 			}
+			// 		}
+			// 	}
+			// }
+			break
+		}
+
+		if !target.HasPiece(pieceID) {
+			continue
+		}
+
+		c.mu.Lock()
+		if _, ok := c.unassigned[pieceID]; ok {
+			c.assign(target, pieceID)
+		}
+		c.mu.Unlock()
 	}
+
 }
 
 func (c *Client) assignedPeer(pieceID int) *peer.Peer {
@@ -307,9 +331,10 @@ func (c *Client) Run(ctx context.Context) {
 			}
 			peer.OnUnassign = func(pieces []int) {
 				c.log.Info("OnUnassign", "free_pieces", pieces)
-				if err := c.rearrangePieces(peer, pieces); err != nil {
-					panic(err)
-				}
+				c.unassignPieces(pieces)
+				// if err := c.rearrangePieces(peer, pieces); err != nil {
+				// 	panic(err)
+				// }
 			}
 			peer.OnMissingPiece = func() {
 				c.log.Info("OnMissing PIECE")

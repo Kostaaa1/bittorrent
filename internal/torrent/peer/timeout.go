@@ -2,6 +2,7 @@ package peer
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -14,7 +15,7 @@ type eventType int
 const (
 	eventAdd eventType = iota
 	eventReset
-	eventDelete
+	eventCancel
 )
 
 type eventMessage struct {
@@ -35,12 +36,35 @@ func (event *event) exceeded() bool {
 }
 
 type timeoutManager struct {
-	C chan eventMessage
+	ch chan eventMessage
 }
 
 func newTimeoutManager() *timeoutManager {
 	return &timeoutManager{
-		C: make(chan eventMessage),
+		ch: make(chan eventMessage),
+	}
+}
+
+func (t *timeoutManager) add(msg messageID, timeout time.Duration, fn func()) {
+	t.ch <- eventMessage{
+		msg:        msg,
+		eventType:  eventAdd,
+		maxTimeout: timeout,
+		onExceed:   fn,
+	}
+}
+
+func (t *timeoutManager) cancel(msg messageID) {
+	t.ch <- eventMessage{
+		msg:       msg,
+		eventType: eventCancel,
+	}
+}
+
+func (t *timeoutManager) reset(msg messageID) {
+	t.ch <- eventMessage{
+		msg:       msg,
+		eventType: eventReset,
 	}
 }
 
@@ -54,11 +78,12 @@ func (t *timeoutManager) run(ctx context.Context, tick time.Duration) {
 		select {
 		case <-ctx.Done():
 			return
-		case msg := <-t.C:
+		case msg := <-t.ch:
+			fmt.Println("MESSAGE: ", msg)
 			ev := events[msg.msg]
 
 			switch msg.eventType {
-			case eventDelete:
+			case eventCancel:
 				delete(events, messageID(msg.eventType))
 			case eventAdd:
 				if _, ok := events[msg.msg]; !ok {
