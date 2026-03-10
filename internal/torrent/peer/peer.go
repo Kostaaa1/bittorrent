@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"test/internal/torrent"
-	"time"
 )
 
 type Bitfield []byte
@@ -39,7 +38,7 @@ type Peer struct {
 	info           *torrent.TorrentInfo
 	log            *slog.Logger
 	pipeline       *pipeline
-	tm             *timeoutManager
+	// tm             *timeoutManager
 	// maybe use channels instead with scheduler.Type
 	OnUnassign     func(pieces []int)
 	OnUnchoke      func()
@@ -55,11 +54,11 @@ func New(
 	log *slog.Logger,
 ) *Peer {
 	return &Peer{
-		ID:           id,
-		Addr:         conn.RemoteAddr().String(),
-		info:         info,
-		conn:         conn,
-		tm:           newTimeoutManager(),
+		ID:   id,
+		Addr: conn.RemoteAddr().String(),
+		info: info,
+		conn: conn,
+		// tm:           newTimeoutManager(),
 		amInterested: false,
 		peerChoking:  true,
 		writer:       w,
@@ -78,27 +77,34 @@ func (peer *Peer) CanAssign() bool {
 	return peer.pipeline.CanAssign()
 }
 
-func (peer *Peer) HasPiece(pieceID int) bool {
+func (peer *Peer) HasPiece(piece int) bool {
 	if peer.bitfield == nil {
 		return true
 	}
-	return peer.bitfield.HasPiece(pieceID)
+	return peer.bitfield.HasPiece(piece)
 }
 
-func (peer *Peer) AddPieceToQueue(pieceID int) {
-	peer.pipeline.assign(pieceID)
+func (peer *Peer) Assign(piece int) bool {
+	if !peer.CanAssign() {
+		return false
+	}
+	if !peer.HasPiece(piece) {
+		return false
+	}
+	peer.pipeline.assign(piece)
 	peer.log.Debug(
 		"[ASSIGN]",
-		"piece", pieceID,
+		"piece", piece,
 		"peer", peer.Addr,
 		"assigned", peer.pipeline.assigned,
 	)
+	return true
 }
 
-func (peer *Peer) UnassignPiece(pieceID int) {
-	peer.pipeline.unassign(pieceID)
+func (peer *Peer) UnassignPiece(piece int) {
+	peer.pipeline.unassign(piece)
 	peer.log.Debug("[UNASSIGN]",
-		"piece", pieceID,
+		"piece", piece,
 		"peer", peer.Addr,
 		"assigned", peer.pipeline.assigned,
 	)
@@ -111,16 +117,16 @@ func (peer *Peer) AssignedPieces() []int {
 	return peer.pipeline.assignedPieces()
 }
 
-func (peer *Peer) ReassignNPieces(n int) []int {
-	return peer.pipeline.ReassignNPieces(n)
+func (peer *Peer) Missing() int {
+	return peer.pipeline.missing()
 }
 
 func (peer *Peer) Close() error {
 	return peer.conn.Close()
 }
 
-func (peer *Peer) dispatchRequests(begin int) {
-	peer.pipeline.removePending(begin)
+func (peer *Peer) dispatchRequests(piece, begin int) {
+	peer.pipeline.removePending(piece, begin)
 	if peer.canRequest() {
 		if err := peer.pipeline.dispatch(); err != nil {
 			if errors.Is(err, ErrFailedToAssignNext) {
@@ -154,7 +160,7 @@ func (peer *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 		},
 	)
 
-	go peer.tm.run(ctx, time.Second)
+	// go peer.tm.run(ctx, time.Second)
 
 	for {
 		select {
@@ -185,24 +191,16 @@ func (peer *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 			peer.peerChoking = true
 
 			if len(peer.pipeline.assigned) > 0 {
-				peer.tm.add(MsgChoke, chokeTimeout, func() {
-					// when specified timeout exceeds, we need to reassign pieces to scheduler
-					// if len(peer.pipeline.assigned) == 0 {
-					// 	return
-					// }
-					// panic("YOOOOOOOO")
-					// clear pipeline
-					// go func() {
-					peer.log.Debug("CHOKE TIMEOUT EXCEEDED!!!!!!!!!")
-					peer.OnUnassign(peer.pipeline.drain())
-					// }()
-				})
+				// peer.tm.add(MsgChoke, chokeTimeout, func() {
+				// 	peer.log.Debug("CHOKE TIMEOUT EXCEEDED!!!!!!!!!")
+				// 	peer.OnUnassign(peer.pipeline.drain())
+				// })
 			}
 
 		case MsgUnchoke:
 			peer.log.Debug("[UNCHOKE]", "peer", peer.Addr)
 			peer.peerChoking = false
-			peer.tm.cancel(MsgChoke)
+			// peer.tm.cancel(MsgChoke)
 			peer.OnUnchoke()
 			if peer.canRequest() {
 				if err := peer.pipeline.dispatch(); err != nil {
@@ -232,7 +230,7 @@ func (peer *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 				"peer", peer.Addr,
 			)
 			peer.writer <- piece
-			peer.dispatchRequests(piece.Begin)
+			peer.dispatchRequests(piece.Index, piece.Begin)
 		case MsgHave:
 			peer.log.Debug("[REQUEST]", "peer", peer.Addr)
 		case MsgCancel:

@@ -6,3 +6,4 @@
 - TODO:
 - Improve data structures, a lot can be simplified
 - Give peer a time window to respond to request. If request is sent and if the peer does not respond with pieces
+- Measure the effectivness of the peer
