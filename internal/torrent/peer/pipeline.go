@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"sync"
+	logger "test/internal/log"
 	"test/internal/torrent"
 	"time"
 )
@@ -30,15 +31,20 @@ type pipeline struct {
 	pending     map[pending]time.Time
 	active      *assignedPiece
 	onDispatch  func(piece, begin, block int)
+	peerAddr    string
+	log         *logger.Log
 }
 
 func newPipeline(
+	peerAddr string,
 	windowSize,
 	maxAssigned int,
 	info *torrent.TorrentInfo,
 	fn func(piece, begin, block int),
+	log *logger.Log,
 ) *pipeline {
 	return &pipeline{
+		peerAddr:    peerAddr,
 		windowSize:  windowSize,
 		maxAssigned: maxAssigned,
 		nextBlock:   0,
@@ -47,6 +53,7 @@ func newPipeline(
 		active:      nil,
 		info:        info,
 		onDispatch:  fn,
+		log:         log,
 	}
 }
 
@@ -62,24 +69,23 @@ func (p *pipeline) removePending(piece, begin int) {
 	p.mu.Unlock()
 }
 
-func (p *pipeline) canDispatch() bool {
+func (p *pipeline) assignable() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return len(p.pending) < p.windowSize
+	return len(p.assigned) < p.maxAssigned/2
 }
 
-func (p *pipeline) CanAssign() bool {
+func (p *pipeline) Missing() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return len(p.assigned) < p.maxAssigned
+	return p.maxAssigned - len(p.assigned)
 }
 
 func (p *pipeline) unassign(pieceID int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.active != nil && p.active.pieceID == pieceID {
-		panic("yoo")
-		// p.active = nil
+		p.active = nil
 	}
 	for id, piece := range p.assigned {
 		if pieceID == piece {
@@ -89,16 +95,36 @@ func (p *pipeline) unassign(pieceID int) {
 	}
 }
 
-func (p *pipeline) assign(piece int) {
+func (p *pipeline) assign(piece int) bool {
 	p.mu.Lock()
-	p.assigned = append(p.assigned, piece)
-	p.mu.Unlock()
+	defer p.mu.Unlock()
+
+	if len(p.assigned) < p.maxAssigned {
+		p.assigned = append(p.assigned, piece)
+		return true
+	}
+
+	return false
 }
 
 func (p *pipeline) assignedPieces() []int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.assigned
+}
+
+func (p *pipeline) reassign() []int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if len(p.assigned) == 0 {
+		return nil
+	}
+
+	pieces := make([]int, len(p.assigned)/2)
+	copy(pieces, p.assigned)
+
+	return pieces
 }
 
 func (p *pipeline) missing() int {
@@ -111,12 +137,15 @@ func (p *pipeline) drain() []int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	p.active = nil
 	p.pending = nil
 	p.nextBlock = 0
 	p.onDispatch = nil
 	assigned := p.assigned
 	p.assigned = nil
+	if p.active != nil {
+		assigned = append(assigned, p.active.pieceID)
+	}
+	p.active = nil
 
 	return assigned
 }
@@ -152,6 +181,12 @@ func (p *pipeline) assignNext() (int, bool) {
 }
 
 var ErrFailedToAssignNext = errors.New("failed to assign new piece")
+
+func (p *pipeline) canDispatch() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.pending) < p.windowSize
+}
 
 func (p *pipeline) dispatch() error {
 	for p.canDispatch() {

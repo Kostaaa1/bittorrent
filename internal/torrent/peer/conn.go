@@ -38,7 +38,7 @@ func (p *Peer) SendHave(pieceID int) error {
 	return p.writeMsg(Message{ID: MsgHave, Payload: payload})
 }
 func (p *Peer) sendRequest(index, begin, block int) error {
-	p.log.Debug("[SEND - REQUEST]",
+	p.log.Traffic("[SEND - REQUEST]",
 		"piece", index,
 		"begin", begin,
 		"peer", p.Addr,

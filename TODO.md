@@ -1,9 +1,5 @@
-- BUG: Peer can choke forever
-- BUG: If peer has 0 assigned pieces, ask scheduler to reassign it to you. If unnassigned map is empty, then take some pieces from another peer.
-- BUG: If peer chokes in the middle of sending pieces. instead of requesting the piece from the beginning, need to continue requesting,
-  Need to track which blocks are downloaded in writer.go. currently blockCount is being used, which is bad.
+BUG: deadlock on peers that are choking us or not responding to REQUEST requests.
 
-- TODO:
-- Improve data structures, a lot can be simplified
-- Give peer a time window to respond to request. If request is sent and if the peer does not respond with pieces
-- Measure the effectivness of the peer
+Solution: give timeout, for example if peer do not get unchoked for eg. 1 minute, then reassign all pieces to scheduler or between peers? For requests, if we do not get PIECE response for some period, eg. 1 minute, then unassign that piece to scheduler (delete pending from blocks, and remove from assigned slice). If that happens 2,3 times, unassign all pieces and close the connection.
+
+- If peer has 0 assigned pieces (it will happen for fast peers), enable reassigning from other pieces

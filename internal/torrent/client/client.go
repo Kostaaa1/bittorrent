@@ -3,11 +3,11 @@ package client
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"net"
 	"slices"
 	"sync"
 	"sync/atomic"
+	logger "test/internal/log"
 	"test/internal/torrent"
 	"test/internal/torrent/peer"
 	"test/internal/torrent/tracker"
@@ -29,7 +29,7 @@ type Client struct {
 	maxGlobalConnections int
 	maxConnectedPeers    int
 	maxHalfOpen          int
-	log                  *slog.Logger
+	log                  *logger.Log
 	// peer
 	peers       []*peer.Peer
 	peerCh      chan tracker.PeerAddress
@@ -45,7 +45,7 @@ func New(
 	files []*torrent.FileEntry,
 	announce string,
 	announceList [][]string,
-	log *slog.Logger,
+	log *logger.Log,
 ) *Client {
 	unassigned := make(map[int]struct{}, len(pieces))
 	for index := range pieces {
@@ -55,6 +55,17 @@ func New(
 	peerCh := make(chan tracker.PeerAddress)
 
 	writer := peer.NewPieceWriter(info, pieces, files)
+
+	// go func() {
+	// 	peerCh <- tracker.PeerAddress{
+	// 		IP:   "139.28.218.144",
+	// 		Port: 36597,
+	// 	}
+	// 	peerCh <- tracker.PeerAddress{
+	// 		IP:   "71.214.121.175",
+	// 		Port: 2277,
+	// 	}
+	// }()
 
 	announcer := tracker.NewAnnouncer(
 		info.InfoHash,
@@ -68,19 +79,19 @@ func New(
 	)
 
 	return &Client{
-		ID:                clientID,
-		Port:              port,
-		Bitfield:          make([]byte, (len(pieces)+7)/8),
-		assigned:          make(map[int]uint64),
-		unassigned:        unassigned,
-		peers:             make([]*peer.Peer, 0),
-		writer:            writer,
-		announcer:         announcer,
-		peerCh:            peerCh,
-		peerCounter:       0,
-		info:              info,
-		log:               log,
-		maxConnectedPeers: 3,
+		ID:          clientID,
+		Port:        port,
+		Bitfield:    make([]byte, (len(pieces)+7)/8),
+		assigned:    make(map[int]uint64),
+		unassigned:  unassigned,
+		peers:       make([]*peer.Peer, 0),
+		writer:      writer,
+		announcer:   announcer,
+		peerCh:      peerCh,
+		peerCounter: 0,
+		info:        info,
+		log:         log,
+		// maxConnectedPeers: 3,
 	}
 }
 
@@ -94,8 +105,7 @@ func (c *Client) addPeer(peer *peer.Peer) {
 func (c *Client) removePeer(target *peer.Peer) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	if pieces := target.AssignedPieces(); len(pieces) > 0 {
+	if pieces := target.Assigned(); len(pieces) > 0 {
 		c.peers = slices.DeleteFunc(c.peers, func(p *peer.Peer) bool {
 			return p.ID == target.ID
 		})
@@ -112,52 +122,111 @@ func (c *Client) unassign(piece int) {
 	c.unassigned[piece] = struct{}{}
 }
 
-func (c *Client) assign(peer *peer.Peer, piece int) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if assigned := peer.Assign(piece); !assigned {
-		return false
-	}
-	delete(c.unassigned, piece)
-	c.assigned[piece] = peer.ID
-	return true
-}
+// func (c *Client) assign(peer *peer.Peer, pieces []int) {
+// 	peer.Assign(pieces)
+// 	for _, piece := range pieces {
+// 		delete(c.unassigned, piece)
+// 		c.assigned[piece] = peer.ID
+// 	}
+// }
 
-// WIP:
 func (c *Client) fillPeerPipeline(target *peer.Peer) {
+	if target == nil {
+		panic("target peer cannot be nil")
+	}
+
+	if !target.Assignable() {
+		c.log.Assignment(
+			"target is not assignable",
+			"peer", target.Addr,
+			"pieces", target.Assigned(),
+		)
+		return
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	missing := target.Missing()
+	pieces := make([]int, 0, missing)
+	n := 0
+
+	c.log.Assignment("target is assignable",
+		"target", target.Addr,
+		"pieces", target.Assigned(),
+		"missing", missing,
+		"unassigned", len(c.unassigned),
+	)
 
 	if len(c.unassigned) > 0 {
 		for piece := range c.unassigned {
-			if !target.CanAssign() {
+			if target.CanAssignPiece(piece) {
+				// pieces[n] = piece
+				pieces = append(pieces, piece)
+				n++
+			}
+			if missing == n {
 				break
 			}
-			if assigned := c.assign(target, piece); !assigned {
-				// panic("failed to assign")
-				continue
+		}
+
+		if len(pieces) > 0 {
+			// assign pieces to peer
+			target.Assign(pieces)
+			// iterate through pieces and delete from unassigned and add to assigned
+			for _, piece := range pieces {
+				delete(c.unassigned, piece)
+				c.assigned[piece] = target.ID
 			}
 		}
 	} else {
-		c.log.Debug("[UNASSIGNING FROM OTHER PEERS]")
-		for _, peer := range c.peers {
-			assigned := peer.AssignedPieces()
-			if len(assigned) == 0 {
-				continue
-			}
+		c.log.Assignment("NO MORE IN UNASSIGNED",
+			"target", target.Addr,
+			"missing", missing,
+			"pieces", target.Assigned(),
+		)
 
-			for _, piece := range assigned {
-				if !target.CanAssign() {
-					break
-				}
-				if assigned := target.Assign(piece); !assigned {
-					continue
-				}
-				peer.UnassignPiece(piece)
-			}
-		}
-		assigned := target.AssignedPieces()
-		c.log.Debug("AFTER ASSIGNMENT TARGET", "pieces", assigned)
+		// if missing < 9 {
+		// 	return
+		// }
+
+		// for _, peer := range c.peers {
+		// 	if peer.ID == target.ID {
+		// 		continue
+		// 	}
+		// 	peerPieces := peer.Reassign()
+		// 	if peerPieces == nil || len(peerPieces) == 0 {
+		// 		continue
+		// 	}
+		// 	c.log.Assignment("portion of pieces",
+		// 		"peer_pieces", peerPieces,
+		// 		"peer", peer.Addr,
+		// 		"count", n,
+		// 		"pieces", pieces,
+		// 	)
+		// 	for _, piece := range peerPieces {
+		// 		if target.CanAssignPiece(piece) {
+		// 			pieces = append(pieces, piece)
+		// 			n++
+		// 		}
+		// 		if missing == n {
+		// 			break
+		// 		}
+		// 	}
+		// 	if len(pieces) > 0 {
+		// 		// assign pieces to target
+		// 		target.Assign(pieces)
+		// 		peer.Unassign(pieces)
+		// 		// unassign same pieces from peer
+		// 		// for _, piece := range pieces {
+		// 		// 	peer.Unassign(piece)
+		// 		// }
+		// 	}
+		// 	if n == len(pieces) {
+		// 		break
+		// 	}
+		// }
+		// c.log.Assignment("AFTER ASSIGNING FROM PEERS", "peer", target.Addr, "pieces", target.Assigned())
 	}
 }
 
@@ -174,20 +243,26 @@ func (c *Client) assignedPeer(pieceID int) *peer.Peer {
 	panic("PEER IS NIL")
 }
 
+// func (c *Client) rearrangePieces(pieces []int) {
+// 	c.mu.Lock()
+// 	defer c.mu.Unlock()
+// 	var peer *peer.Peer
+// }
+
 func (c *Client) collectResults(results <-chan peer.Result) {
 	for result := range results {
 		peer := c.assignedPeer(result.Index)
 		peer.UnassignPiece(result.Index)
 
 		if result.Err != nil {
-			c.log.Debug(
+			c.log.Write(
 				"[FAILED TO DOWNLOAD]",
 				"piece", result.Index,
 				"erorr", result.Err,
 			)
 			c.unassign(result.Index)
 		} else {
-			c.log.Debug(
+			c.log.Write(
 				"[DOWNLOAD]",
 				"piece", result.Index,
 				"piece_offset", result.Begin,
@@ -218,6 +293,7 @@ func (c *Client) Run(ctx context.Context) {
 	go c.announcer.Run(ctx)
 	go c.writer.Run()
 	go c.collectResults(resultC)
+	go c.printPeers()
 
 	var peerSem chan struct{}
 	if c.maxConnectedPeers > 0 {
@@ -238,21 +314,22 @@ func (c *Client) Run(ctx context.Context) {
 			}
 
 			peerID := atomic.AddUint64(&c.peerCounter, 1) - 1
+
 			peer := peer.New(peerID, conn, c.info, writerC, c.log)
 
 			peer.OnHandshake = func() {
 				c.addPeer(peer)
 			}
 			peer.OnUnchoke = func() {
-				c.log.Debug("on Unchoke, assigning pieces")
+				c.log.Debug("on Unchoke, assigning pieces", "peer", peer.Addr)
 				c.fillPeerPipeline(peer)
 			}
 			peer.OnMissingPiece = func() {
-				c.log.Info("OnMissing PIECE")
+				c.log.Info("OnMissing PIECE", "peer", peer.Addr)
 				c.fillPeerPipeline(peer)
 			}
 			peer.OnUnassign = func(pieces []int) {
-				c.log.Info("OnUnassign", "free_pieces", pieces)
+				c.log.Info("OnUnassign", "peer", peer.Addr, "free_pieces", pieces)
 				// if err := c.rearrangePieces(peer, pieces); err != nil {
 				// 	panic(err)
 				// }
@@ -264,5 +341,17 @@ func (c *Client) Run(ctx context.Context) {
 				return
 			}
 		}()
+	}
+}
+
+func (c *Client) printPeers() {
+	tick := time.NewTicker(time.Minute)
+	for range tick.C {
+		c.mu.Lock()
+		peers := c.peers
+		c.mu.Unlock()
+		for _, peer := range peers {
+			peer.Print()
+		}
 	}
 }

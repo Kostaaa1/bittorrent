@@ -4,10 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"log"
-	"log/slog"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	logger "test/internal/log"
 	"test/internal/torrent"
 	"test/internal/torrent/client"
 	"test/internal/torrent/peer"
@@ -58,27 +58,14 @@ func main() {
 		NumBlocksPerPiece: NumBlocksPerPiece,
 	}
 
-	log := newLogger()
+	// log := newLogger()
+	// f, _ := os.OpenFile("traffic.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	// f := os.Stdout
+	// f := io.Discard
 
+	log := logger.New(os.Stdout)
 	c := client.New(clientID, port, info, tf.Pieces, tf.Files, tf.Announce, tf.AnnounceList, log)
 	ctx := context.Background()
 
 	c.Run(ctx)
-}
-
-func newLogger() *slog.Logger {
-	opts := &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-			if a.Key == slog.TimeKey && len(groups) == 0 {
-				return slog.Attr{}
-			}
-			return a
-		},
-	}
-	f, _ := os.OpenFile("traffic.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	// f := os.Stdout
-	logger := slog.New(slog.NewTextHandler(f, opts))
-	slog.SetDefault(logger)
-	return logger
 }
