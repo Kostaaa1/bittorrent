@@ -6,7 +6,8 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"test/pkg/bencode"
+
+	"github.com/Kostaaa1/bittorrent/pkg/bencode"
 )
 
 type AnnounceResponse struct {

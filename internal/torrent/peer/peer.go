@@ -6,9 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net"
-	logger "test/internal/log"
-	"test/internal/torrent"
 	"time"
+
+	logger "github.com/Kostaaa1/bittorrent/internal/log"
+	"github.com/Kostaaa1/bittorrent/internal/torrent"
 )
 
 type Bitfield []byte
@@ -38,8 +39,6 @@ type Peer struct {
 	info           *torrent.TorrentInfo
 	log            *logger.Log
 	pipeline       *pipeline
-	tm             *timeoutManager
-	// maybe use channels instead with scheduler.Type
 	OnUnassign     func(pieces []int)
 	OnUnchoke      func()
 	OnHandshake    func()
@@ -61,7 +60,6 @@ func New(
 		amInterested: false,
 		peerChoking:  true,
 		writer:       w,
-		tm:           newTimeoutManager(),
 		log:          log,
 	}
 }
@@ -144,15 +142,15 @@ func (peer *Peer) Assign(pieces []int) {
 	)
 }
 
-func (peer *Peer) Reassign() []int {
-	return peer.pipeline.reassign()
-}
+// func (peer *Peer) Reassign() []int {
+// 	return peer.pipeline.reassign()
+// }
 
 func (peer *Peer) Assigned() []int {
 	if peer.pipeline == nil {
 		return nil
 	}
-	return peer.pipeline.assignedPieces()
+	return peer.pipeline.Assigned()
 }
 
 func (peer *Peer) Close() error {
@@ -194,93 +192,89 @@ func (peer *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 		10,
 		peer.info,
 		func(piece, begin, block int) {
-			peer.tm.add(MsgRequest, requestTimeout)
 			peer.sendRequest(piece, begin, block)
 		},
 		peer.log,
 	)
 
-	go peer.tm.run(ctx, time.Second)
+	var chokeDeadlineFn *time.Timer
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case msg := <-peer.tm.ExceedChan:
-			switch msg {
-			case MsgChoke:
-				peer.log.Info("[CHOKE TIMEOUT EXCEEDED]")
-				pieces := peer.pipeline.drain()
-				peer.OnUnassign(pieces)
-			case MsgRequest:
-				peer.log.Info("[REQUEST TIMEOUT EXCEEDED]", "peer", peer.Addr)
-			}
+
 		default:
-		}
-
-		msg, err := readMessage(peer.conn)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil
-			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				peer.log.Traffic("[SLOW PEER]", "peer", peer.Addr)
-				return peer.Close()
+			msg, err := readMessage(peer.conn)
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					return nil
+				} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue
+				}
+				return err
 			}
-			return err
-		}
 
-		switch msg.ID {
-		case MsgChoke:
-			peer.log.Debug("[CHOKE]", "peer", peer.Addr)
-			if peer.peerChoking {
-				continue
-			}
-			peer.peerChoking = true
-			if len(peer.pipeline.assignedPieces()) > 0 {
-				peer.tm.add(MsgChoke, chokeTimeout)
-			}
-		case MsgUnchoke:
-			peer.log.Debug("[UNCHOKE]", "peer", peer.Addr)
-			peer.peerChoking = false
-			peer.tm.cancel(MsgChoke)
+			switch msg.ID {
+			case MsgChoke:
+				peer.log.Debug("[CHOKE]", "peer", peer.Addr)
+				if peer.peerChoking {
+					continue
+				}
+				peer.peerChoking = true
 
-			peer.OnUnchoke()
-			if peer.canRequest() {
-				if err := peer.pipeline.dispatch(); err != nil {
-					if errors.Is(err, ErrFailedToAssignNext) {
-						peer.OnMissingPiece()
+				chokeDeadlineFn = time.AfterFunc(time.Second*15, func() {
+					fmt.Println("UNCHOKE EXCEED", peer.Addr, msg)
+					pieces := peer.pipeline.reset()
+					peer.OnUnassign(pieces)
+				})
+			case MsgUnchoke:
+				peer.log.Debug("[UNCHOKE]", "peer", peer.Addr)
+
+				peer.peerChoking = false
+				if chokeDeadlineFn != nil {
+					chokeDeadlineFn.Stop()
+					chokeDeadlineFn = nil
+				}
+
+				if peer.canRequest() {
+					peer.OnUnchoke()
+					if err := peer.pipeline.dispatch(); err != nil {
+						if errors.Is(err, ErrFailedToAssignNext) {
+							peer.OnMissingPiece()
+						}
 					}
 				}
+
+			case MsgPiece:
+				piece := parsePieceMessage(msg.Payload)
+				peer.log.Traffic(
+					"[PIECE]",
+					"piece", piece.Index,
+					"begin", piece.Begin,
+					"peer", peer.Addr,
+				)
+				peer.writer <- piece
+				peer.dispatchRequests(piece.Index, piece.Begin)
+			case MsgInterested:
+				peer.log.Traffic("[INTERESTED]", "peer", peer.Addr)
+				peer.peerInterested = true
+				peer.sendUnchoke()
+			case MsgUninterested:
+				peer.log.Traffic("[UNINTERESTED]", "peer", peer.Addr)
+				peer.peerInterested = false
+			case MsgBitfield:
+				peer.log.Traffic("[BITFIELD]", "peer", peer.Addr)
+				peer.bitfield = msg.Payload
+			case MsgRequest:
+				peer.log.Traffic("[REQUEST]", "peer", peer.Addr)
+			case MsgHave:
+				peer.log.Traffic("[HAVE]", "peer", peer.Addr)
+			case MsgCancel:
+				peer.log.Traffic("[CANCEL]", "peer", peer.Addr)
+			case MsgPort:
+				peer.log.Traffic("[PORT]", "peer", peer.Addr)
 			}
-		case MsgInterested:
-			peer.log.Traffic("[INTERESTED]", "peer", peer.Addr)
-			peer.peerInterested = true
-			peer.sendUnchoke()
-		case MsgUninterested:
-			peer.log.Traffic("[UNINTERESTED]", "peer", peer.Addr)
-			peer.peerInterested = false
-		case MsgBitfield:
-			peer.log.Traffic("[BITFIELD]", "peer", peer.Addr)
-			peer.bitfield = msg.Payload
-		case MsgRequest:
-			peer.log.Traffic("[REQUEST]", "peer", peer.Addr)
-		case MsgPiece:
-			piece := parsePieceMessage(msg.Payload)
-			peer.tm.cancel(MsgRequest)
-			peer.log.Traffic(
-				"[PIECE]",
-				"piece", piece.Index,
-				"begin", piece.Begin,
-				"peer", peer.Addr,
-			)
-			peer.writer <- piece
-			peer.dispatchRequests(piece.Index, piece.Begin)
-		case MsgHave:
-			peer.log.Traffic("[REQUEST]", "peer", peer.Addr)
-		case MsgCancel:
-			peer.log.Traffic("[CANCEL]", "peer", peer.Addr)
-		case MsgPort:
-			peer.log.Traffic("[PORT]", "peer", peer.Addr)
 		}
 	}
 }

@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"test/pkg/bencode"
+
+	"github.com/Kostaaa1/bittorrent/pkg/bencode"
 )
 
 type FileEntry struct {

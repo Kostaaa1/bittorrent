@@ -5,7 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 
-	"test/pkg/bencode"
+	"github.com/Kostaaa1/bittorrent/pkg/bencode"
 )
 
 type infoMode int

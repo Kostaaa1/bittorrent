@@ -1,5 +1,8 @@
-BUG: deadlock on peers that are choking us or not responding to REQUEST requests.
+1. [DONE] BUG: if peer choke us, no way of unassigning pieces to scheduler
+   Solution:
+   1. when choke happens, give peer a deadline to unchoke us. if it exceeds, then unassign all pieces to scheduler.
 
-Solution: give timeout, for example if peer do not get unchoked for eg. 1 minute, then reassign all pieces to scheduler or between peers? For requests, if we do not get PIECE response for some period, eg. 1 minute, then unassign that piece to scheduler (delete pending from blocks, and remove from assigned slice). If that happens 2,3 times, unassign all pieces and close the connection.
-
-- If peer has 0 assigned pieces (it will happen for fast peers), enable reassigning from other pieces
+2. BUG: if peer does not respond with PIECE message to REQUEST message, it will cause deadlock with assigned pieces. Need to reassign pieces back to scehduler if we get no responses for some time.
+   Solution:
+   1. yoo
+   2. yoo

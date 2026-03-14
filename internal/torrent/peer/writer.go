@@ -6,7 +6,8 @@ import (
 	"log"
 	"math"
 	"os"
-	"test/internal/torrent"
+
+	"github.com/Kostaaa1/bittorrent/internal/torrent"
 )
 
 type Result struct {

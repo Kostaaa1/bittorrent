@@ -7,10 +7,11 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
-	logger "test/internal/log"
-	"test/internal/torrent"
-	"test/internal/torrent/client"
-	"test/internal/torrent/peer"
+
+	logger "github.com/Kostaaa1/bittorrent/internal/log"
+	"github.com/Kostaaa1/bittorrent/internal/torrent"
+	"github.com/Kostaaa1/bittorrent/internal/torrent/client"
+	"github.com/Kostaaa1/bittorrent/internal/torrent/peer"
 )
 
 func getClientID() ([20]byte, error) {

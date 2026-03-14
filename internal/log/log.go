@@ -13,7 +13,7 @@ type Log struct {
 const (
 	levelAssign  slog.Level = 2
 	levelWrite   slog.Level = 4
-	levelTraffic slog.Level = -20
+	levelTraffic slog.Level = 6
 )
 
 func (l *Log) Traffic(msg string, args ...any) {
