@@ -130,15 +130,7 @@ func (c *Client) unassign(piece int) {
 	c.unassigned[piece] = struct{}{}
 }
 
-// func (c *Client) assign(peer *peer.Peer, pieces []int) {
-// 	peer.Assign(pieces)
-// 	for _, piece := range pieces {
-// 		delete(c.unassigned, piece)
-// 		c.assigned[piece] = peer.ID
-// 	}
-// }
-
-func (c *Client) fillPeerPipeline(target *peer.Peer) {
+func (c *Client) schedulePieces(target *peer.Peer) {
 	if target == nil {
 		panic("target peer cannot be nil")
 	}
@@ -178,9 +170,7 @@ func (c *Client) fillPeerPipeline(target *peer.Peer) {
 		}
 
 		if len(pieces) > 0 {
-			// assign pieces to peer
 			target.Assign(pieces)
-			// iterate through pieces and delete from unassigned and add to assigned
 			for _, piece := range pieces {
 				delete(c.unassigned, piece)
 				c.assigned[piece] = target.ID
@@ -192,46 +182,6 @@ func (c *Client) fillPeerPipeline(target *peer.Peer) {
 			"missing", missing,
 			"pieces", target.Assigned(),
 		)
-
-		// for _, peer := range c.peers {
-		// 	if peer.ID == target.ID {
-		// 		continue
-		// 	}
-
-		// 	peerPieces := peer.Reassign()
-		// 	if peerPieces == nil || len(peerPieces) == 0 {
-		// 		continue
-		// 	}
-
-		// 	c.log.Assignment("portion of pieces",
-		// 		"peer_pieces", peerPieces,
-		// 		"peer", peer.Addr,
-		// 		"count", n,
-		// 		"pieces", pieces,
-		// 	)
-		// 	for _, piece := range peerPieces {
-		// 		if target.CanAssignPiece(piece) {
-		// 			pieces = append(pieces, piece)
-		// 			n++
-		// 		}
-		// 		if missing == n {
-		// 			break
-		// 		}
-		// 	}
-		// 	if len(pieces) > 0 {
-		// 		// assign pieces to target
-		// 		target.Assign(pieces)
-		// 		peer.Unassign(pieces)
-		// 		// unassign same pieces from peer
-		// 		// for _, piece := range pieces {
-		// 		// 	peer.Unassign(piece)
-		// 		// }
-		// 	}
-		// 	if n == len(pieces) {
-		// 		break
-		// 	}
-		// }
-		// c.log.Assignment("AFTER ASSIGNING FROM PEERS", "peer", target.Addr, "pieces", target.Assigned())
 	}
 }
 
@@ -274,7 +224,7 @@ func (c *Client) collectResults(results <-chan peer.Result) {
 			// update bitfield
 			c.Bitfield.SetPiece(result.Index)
 			// assign new pieces to peer
-			c.fillPeerPipeline(peer)
+			c.schedulePieces(peer)
 			// notify/send have message to all peers that we have a piece
 			// c.NotifyPeers(result.Index)
 		}
@@ -322,11 +272,11 @@ func (c *Client) Run(ctx context.Context) {
 			}
 			peer.OnUnchoke = func() {
 				c.log.Debug("on Unchoke, assigning pieces", "peer", peer.Addr)
-				c.fillPeerPipeline(peer)
+				c.schedulePieces(peer)
 			}
 			peer.OnMissingPiece = func() {
 				c.log.Info("OnMissing PIECE", "peer", peer.Addr)
-				// c.fillPeerPipeline(peer)
+				// c.assign(peer)
 			}
 			peer.OnUnassign = func(pieces []int) {
 				c.log.Info("OnUnassign",

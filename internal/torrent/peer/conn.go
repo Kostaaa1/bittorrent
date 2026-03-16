@@ -49,3 +49,16 @@ func (p *Peer) sendRequest(index, begin, block int) error {
 	binary.BigEndian.PutUint32(msg[8:12], uint32(block))
 	return p.writeMsg(Message{ID: MsgRequest, Payload: msg})
 }
+
+func (p *Peer) sendCancel(index, begin, block int) error {
+	p.log.Traffic("[SEND - CANCEL]",
+		"piece", index,
+		"begin", begin,
+		"peer", p.Addr,
+	)
+	msg := make([]byte, 12)
+	binary.BigEndian.PutUint32(msg[:4], uint32(index))
+	binary.BigEndian.PutUint32(msg[4:8], uint32(begin))
+	binary.BigEndian.PutUint32(msg[8:12], uint32(block))
+	return p.writeMsg(Message{ID: MsgCancel, Payload: msg})
+}
