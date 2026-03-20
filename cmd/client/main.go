@@ -59,11 +59,6 @@ func main() {
 		NumBlocksPerPiece: NumBlocksPerPiece,
 	}
 
-	// log := newLogger()
-	// f, _ := os.OpenFile("traffic.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	// f := os.Stdout
-	// f := io.Discard
-
 	log := logger.New(os.Stdout)
 	c := client.New(clientID, port, info, tf.Pieces, tf.Files, tf.Announce, tf.AnnounceList, log)
 	ctx := context.Background()

@@ -34,12 +34,11 @@ func (entry *FileEntry) OpenFile() error {
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
 
-	f, err := os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
 	}
