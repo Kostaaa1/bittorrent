@@ -59,9 +59,22 @@ func main() {
 		NumBlocksPerPiece: NumBlocksPerPiece,
 	}
 
-	log := logger.New(os.Stdout)
-	c := client.New(clientID, port, info, tf.Pieces, tf.Files, tf.Announce, tf.AnnounceList, log)
-	ctx := context.Background()
+	// w, err := os.OpenFile("traffic.log", os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	w := os.Stdout
+	log := logger.New(w)
 
-	c.Run(ctx)
+	c := client.New(clientID,
+		port,
+		info,
+		tf.Pieces,
+		tf.Files,
+		tf.Announce,
+		tf.AnnounceList,
+		log,
+	)
+
+	c.Run(context.Background())
 }

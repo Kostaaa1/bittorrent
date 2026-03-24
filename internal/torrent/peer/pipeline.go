@@ -10,24 +10,24 @@ import (
 	"github.com/Kostaaa1/bittorrent/internal/torrent"
 )
 
-type block struct {
-	piece int
-	begin int
+type requestPiece struct {
+	pending     []int
+	requestedAt time.Time
 }
 
 type pipeline struct {
-	mu          sync.Mutex
-	maxAssigned int
-	windowSize  int
-	info        *torrent.TorrentInfo
-	nextBlock   int
-	pieces      []int
-	pending     map[block]time.Time
-	active      int
-	hasActive   bool
-	onDispatch  func(piece, begin, block int)
-	peerAddr    string
-	log         *logger.Log
+	mu           sync.Mutex
+	maxAssigned  int
+	windowSize   int
+	info         *torrent.TorrentInfo
+	nextBlock    int
+	pieces       map[int]*requestPiece
+	pendingCount int
+	active       int
+	hasActive    bool
+	onDispatch   func(piece, begin, block int)
+	peerAddr     string
+	log          *logger.Log
 }
 
 func newPipeline(
@@ -43,8 +43,7 @@ func newPipeline(
 		windowSize:  windowSize,
 		maxAssigned: maxAssigned,
 		nextBlock:   0,
-		pending:     make(map[block]time.Time),
-		pieces:      make([]int, 0, maxAssigned),
+		pieces:      make(map[int]*requestPiece),
 		active:      0,
 		hasActive:   false,
 		info:        info,
@@ -55,13 +54,27 @@ func newPipeline(
 
 func (p *pipeline) addPendingBlock(piece, begin int) {
 	p.mu.Lock()
-	p.pending[block{piece, begin}] = time.Now()
+	request, ok := p.pieces[piece]
+	if !ok {
+		panic("piece missing?")
+	} else {
+		request.pending = append(request.pending, begin)
+		request.requestedAt = time.Now()
+		p.pendingCount++
+	}
 	p.mu.Unlock()
 }
 
 func (p *pipeline) removePendingBlock(piece, begin int) {
 	p.mu.Lock()
-	delete(p.pending, block{piece, begin})
+	req := p.pieces[piece]
+	for id, block := range req.pending {
+		if block == begin {
+			p.pendingCount--
+			req.pending = append(req.pending[:id], req.pending[id+1:]...)
+			break
+		}
+	}
 	p.mu.Unlock()
 }
 
@@ -77,65 +90,47 @@ func (p *pipeline) Capacity() int {
 	return p.maxAssigned - len(p.pieces)
 }
 
-func (p *pipeline) unassign(pieceID int) {
+func (p *pipeline) unassign(piece int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.hasActive && p.active == pieceID {
+	if p.hasActive && p.active == piece {
 		p.active = 0
 		p.hasActive = false
 	}
 
-	for id, piece := range p.pieces {
-		if pieceID == piece {
-			p.pieces = append(p.pieces[:id], p.pieces[id+1:]...)
-			break
-		}
-	}
+	delete(p.pieces, piece)
 }
 
 func (p *pipeline) assign(piece int) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
 	if len(p.pieces) < p.maxAssigned {
-		p.pieces = append(p.pieces, piece)
+		p.pieces[piece] = &requestPiece{pending: make([]int, 0)}
 		return true
 	}
+
 	return false
-}
-
-func (p *pipeline) removePendingBlocks(piece int) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	// NOTE: is it safe to delete while looping, or i need to copy?
-	for req := range p.pending {
-		if req.piece == piece {
-			delete(p.pending, req)
-		}
-	}
-}
-
-func (p *pipeline) reassign(piece int) {
-	p.removePendingBlocks(piece)
 }
 
 func (p *pipeline) Assigned() []int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.pieces
+
+	pieces := make([]int, len(p.pieces))
+	for piece := range p.pieces {
+		pieces = append(pieces, piece)
+	}
+
+	return pieces
 }
 
 func (p *pipeline) reset() []int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	cap := len(p.pieces)
-	if p.hasActive {
-		cap++
-	}
-
-	toReassign := make([]int, 0, cap)
-	toReassign = append(toReassign, p.pieces...)
+	toReassign := p.Assigned()
 
 	if p.hasActive {
 		toReassign = append(toReassign, p.active)
@@ -144,8 +139,7 @@ func (p *pipeline) reset() []int {
 	p.hasActive = false
 	p.active = 0
 	p.nextBlock = 0
-	p.pieces = make([]int, 0, p.maxAssigned)
-	p.pending = make(map[block]time.Time)
+	p.pieces = make(map[int]*requestPiece)
 
 	return toReassign
 }
@@ -163,16 +157,30 @@ func (p *pipeline) assignNextLocked() (int, bool) {
 	if len(p.pieces) == 0 {
 		return -1, false
 	}
-	for id, piece := range p.pieces {
+
+	for piece := range p.pieces {
 		if !p.hasActive || p.active != piece {
 			p.nextBlock = 0
 			p.hasActive = true
 			p.active = piece
-			p.pieces = append(p.pieces[:id], p.pieces[id+1:]...)
 			return piece, true
 		}
 	}
+
 	return -1, false
+}
+
+var ErrFailedToAssignNext = errors.New("failed to assign new piece")
+
+func (p *pipeline) canDispatch() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !p.hasActive {
+		return false
+	}
+
+	return p.pendingCount < p.windowSize
 }
 
 func (p *pipeline) assignNext() (int, bool) {
@@ -181,15 +189,15 @@ func (p *pipeline) assignNext() (int, bool) {
 	return p.assignNextLocked()
 }
 
-var ErrFailedToAssignNext = errors.New("failed to assign new piece")
-
-func (p *pipeline) canDispatch() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return len(p.pending) < p.windowSize
-}
-
 func (p *pipeline) Dispatch() error {
+	if !p.hasActive {
+		index, ok := p.assignNext()
+		if !ok {
+			return ErrFailedToAssignNext
+		}
+		_ = index
+	}
+
 	for p.canDispatch() {
 		index, ok := p.getActiveOrAssignNext()
 		if !ok {

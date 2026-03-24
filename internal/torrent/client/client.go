@@ -18,26 +18,23 @@ var ErrNoPeers = errors.New("failed to assign pieces: 0 peers")
 var ErrFailedAssignment = errors.New("failed to assign pieces: no peers can accept the pieces")
 
 type Client struct {
-	ID       [20]byte
-	Port     uint16
-	Bitfield peer.Bitfield
-
+	ID         [20]byte
+	Port       uint16
+	Bitfield   peer.Bitfield
 	assigned   map[int]*peer.Peer
 	unassigned map[int]struct{}
-
-	writer    *peer.PieceWriter
-	announcer *tracker.Announcer
-	info      *torrent.TorrentInfo
-	log       *logger.Log
+	writer     *peer.PieceWriter
+	announcer  *tracker.Announcer
+	info       *torrent.TorrentInfo
+	log        *logger.Log
 	// active peers which passed the handshake
-	peers  []*peer.Peer
-	peerCh chan tracker.PeerAddress
-
-	mu sync.Mutex
-
+	peers                []*peer.Peer
+	peerCh               chan tracker.PeerAddress
+	mu                   sync.Mutex
 	maxGlobalConnections int
 	maxConnectedPeers    int
 	maxHalfOpen          int
+	endgameMode          bool
 }
 
 func New(
@@ -58,14 +55,29 @@ func New(
 	peerCh := make(chan tracker.PeerAddress)
 	writer := peer.NewPieceWriter(info, pieces, files)
 
+	// go func() {
+	// 	peerCh <- tracker.PeerAddress{
+	// 		IP:   "91.197.66.251",
+	// 		Port: 51413,
+	// 	}
+	// 	peerCh <- tracker.PeerAddress{
+	// 		IP:   "185.159.158.108",
+	// 		Port: 60491,
+	// 	}
+	// 	peerCh <- tracker.PeerAddress{
+	// 		IP:   "212.104.214.132",
+	// 		Port: 52048,
+	// 	}
+	// 	peerCh <- tracker.PeerAddress{
+	// 		IP:   "212.104.214.132",
+	// 		Port: 52048,
+	// 	}
+	// }()
+
 	go func() {
 		peerCh <- tracker.PeerAddress{
-			IP:   "193.5.16.196",
-			Port: 31337,
-		}
-		peerCh <- tracker.PeerAddress{
-			IP:   "2.216.38.247",
-			Port: 62103,
+			IP:   "148.56.177.88",
+			Port: 14420,
 		}
 	}()
 
@@ -81,18 +93,19 @@ func New(
 	)
 
 	return &Client{
-		ID:         clientID,
-		Port:       port,
-		Bitfield:   make([]byte, (len(pieces)+7)/8),
-		assigned:   make(map[int]*peer.Peer),
-		unassigned: unassigned,
-		peers:      make([]*peer.Peer, 0),
-		writer:     writer,
-		announcer:  announcer,
-		peerCh:     peerCh,
-		info:       info,
-		log:        log,
-		// maxConnectedPeers: 3,
+		ID:                clientID,
+		Port:              port,
+		Bitfield:          make([]byte, (len(pieces)+7)/8),
+		assigned:          make(map[int]*peer.Peer),
+		unassigned:        unassigned,
+		peers:             make([]*peer.Peer, 0),
+		writer:            writer,
+		announcer:         announcer,
+		peerCh:            peerCh,
+		info:              info,
+		log:               log,
+		maxConnectedPeers: 1,
+		// maxConnectedPeers: 10,
 	}
 }
 
@@ -102,13 +115,11 @@ func (c *Client) addPeer(peer *peer.Peer) {
 	c.peers = append(c.peers, peer)
 }
 
-// removes peer from slice of peers and mark its pieces unassigned
 func (c *Client) removePeer(target *peer.Peer) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if pieces := target.Assigned(); len(pieces) > 0 {
 		c.peers = slices.DeleteFunc(c.peers, func(p *peer.Peer) bool {
-			// same memory address
 			return p == target
 		})
 		for _, piece := range pieces {
@@ -122,6 +133,23 @@ func (c *Client) unassign(piece int) {
 	defer c.mu.Unlock()
 	delete(c.assigned, piece)
 	c.unassigned[piece] = struct{}{}
+}
+
+func (c *Client) assign(target *peer.Peer, piece int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.unassigned, piece)
+	c.assigned[piece] = target
+}
+
+func (c *Client) assignPieces(target *peer.Peer, pieces []int) {
+	if len(pieces) == 0 {
+		return
+	}
+	target.Assign(pieces)
+	for _, piece := range pieces {
+		c.assign(target, piece)
+	}
 }
 
 func (c *Client) schedulePieces(target *peer.Peer) {
@@ -138,22 +166,22 @@ func (c *Client) schedulePieces(target *peer.Peer) {
 		return
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	cap := target.Capacity()
 	pieces := make([]int, 0, cap)
 	n := 0
 
+	c.mu.Lock()
+	unassigned := c.unassigned
 	c.log.Assignment("target is assignable",
 		"target", target.Addr,
 		"pieces", target.Assigned(),
 		"missing", cap,
 		"unassigned", len(c.unassigned),
 	)
+	c.mu.Unlock()
 
-	if len(c.unassigned) > 0 {
-		for piece := range c.unassigned {
+	if len(unassigned) > 0 {
+		for piece := range unassigned {
 			if target.CanAssignPiece(piece) {
 				pieces = append(pieces, piece)
 				n++
@@ -162,27 +190,31 @@ func (c *Client) schedulePieces(target *peer.Peer) {
 				break
 			}
 		}
-
-		if len(pieces) > 0 {
-			target.Assign(pieces)
-			for _, piece := range pieces {
-				delete(c.unassigned, piece)
-				c.assigned[piece] = target
-			}
-		}
 	} else {
+		// TODO: could possibly take portion of pieces from other peers (choose them randomly or by their effectiveness)
 		c.log.Debug("NO MORE IN UNASSIGNED",
 			"target", target.Addr,
 			"missing", cap,
 			"pieces", target.Assigned(),
 		)
 	}
+
+	c.assignPieces(target, pieces)
 }
 
 func (c *Client) collectResults(results <-chan peer.Result) {
 	for result := range results {
+		c.mu.Lock()
 		peer := c.assigned[result.Index]
+		c.mu.Unlock()
+
 		peer.UnassignPiece(result.Index)
+
+		c.mu.Lock()
+		if c.info.NumOfPieces-len(c.assigned)+len(c.unassigned) <= 20 {
+			c.endgameMode = true
+		}
+		c.mu.Unlock()
 
 		if result.Err != nil {
 			c.log.Write(
@@ -191,6 +223,7 @@ func (c *Client) collectResults(results <-chan peer.Result) {
 				"piece", result.Index,
 				"erorr", result.Err,
 				"peers", len(c.peers),
+				"endgame", c.endgameMode,
 			)
 			c.unassign(result.Index)
 		} else {
@@ -201,6 +234,7 @@ func (c *Client) collectResults(results <-chan peer.Result) {
 				"piece_offset", result.Begin,
 				"piece_length", result.LenBlock,
 				"peers", len(c.peers),
+				"endgame", c.endgameMode,
 			)
 			// increment the number of downloaded
 			// c.announcer.IncDownloaded(uint64(result.LenBlock))
@@ -224,7 +258,7 @@ func (c *Client) Run(ctx context.Context) {
 
 	writerC, resultC := c.writer.Channels()
 
-	// go c.announcer.Run(ctx)
+	go c.announcer.Run(ctx)
 	go c.writer.Run()
 	go c.collectResults(resultC)
 	go c.printPeers()
@@ -261,12 +295,10 @@ func (c *Client) Run(ctx context.Context) {
 					"peer", peer.Addr,
 					"free_pieces", pieces,
 				)
+				// TODO: currently adding pieces to unassigned, might be better to directly reassign them among other peers
 				for _, piece := range pieces {
 					c.unassign(piece)
 				}
-				// if err := c.rearrangePieces(peer, pieces); err != nil {
-				// 	panic(err)
-				// }
 			}
 
 			if err := peer.Open(ctx, hs, c.Bitfield); err != nil {

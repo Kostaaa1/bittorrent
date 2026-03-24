@@ -95,6 +95,7 @@ func (pw *PieceWriter) writeBlock(msg PieceMessage) *pieceBuffer {
 	if pbuf == nil {
 		pbuf = pw.newPieceBuffer(msg.Index)
 	}
+
 	pbuf.writeBlock(msg.Begin, msg.Block)
 	pw.pieces[msg.Index] = pbuf
 	return pbuf

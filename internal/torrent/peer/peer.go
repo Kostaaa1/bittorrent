@@ -158,6 +158,12 @@ func (peer *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 		peer.OnHandshake()
 	}
 
+	if err := peer.conn.SetDeadline(time.Now().Add(time.Minute)); err != nil {
+		return fmt.Errorf("failed to set deadline: %v", err)
+	}
+
+	// TODO: add keepalive
+
 	peer.sendBitfield(b)
 	peer.sendInterested()
 
@@ -193,7 +199,7 @@ func (peer *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 				peer.log.Debug("[CHOKE]",
 					"peer", peer.Addr,
 					"pieces", peer.pipeline.pieces,
-					"pending", peer.pipeline.pending,
+					// "pending", peer.pipeline.pending,
 					"active", peer.pipeline.active,
 				)
 
@@ -208,7 +214,7 @@ func (peer *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 					peer.log.Debug("[UNCHOKE DEADLINE EXCEED - reasignign pieces]",
 						"peer", peer.Addr,
 						"pieces", pieces,
-						"pending", peer.pipeline.pending,
+						// "pending", peer.pipeline.pending,
 						"active", peer.pipeline.active,
 					)
 					peer.OnReassign(pieces)
@@ -225,7 +231,7 @@ func (peer *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 					"can_request", peer.canRequest(),
 					"can_dispatch", peer.pipeline.canDispatch(),
 					"pieces", peer.pipeline.pieces,
-					"pending", peer.pipeline.pending,
+					// "pending", peer.pipeline.pending,
 					"active", peer.pipeline.active,
 				)
 
@@ -311,7 +317,7 @@ func (peer *Peer) Print() {
 		"active", peer.pipeline.active,
 		"pieces", peer.pipeline.pieces,
 		"pieces_len", len(peer.pipeline.pieces),
-		"inflight", peer.pipeline.pending,
-		"len_inflight", len(peer.pipeline.pending),
+		// "inflight", peer.pipeline.pending,
+		// "len_inflight", len(peer.pipeline.pending),
 	)
 }
