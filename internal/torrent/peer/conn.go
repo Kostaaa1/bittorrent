@@ -1,6 +1,10 @@
 package peer
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+
+	"github.com/Kostaaa1/bittorrent/internal/torrent/shared"
+)
 
 func (p *Peer) writeMsg(msg Message) error {
 	if _, err := p.conn.Write(msg.Bytes()); err != nil {
@@ -29,7 +33,7 @@ func (p *Peer) sendUninterested() {
 func (p *Peer) sendKeepAlive() {
 	p.writeMsg(Message{})
 }
-func (p *Peer) sendBitfield(bf Bitfield) {
+func (p *Peer) sendBitfield(bf shared.Bitfield) {
 	p.writeMsg(Message{ID: MsgBitfield, Payload: bf})
 }
 func (p *Peer) SendHave(pieceID int) error {

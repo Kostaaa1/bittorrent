@@ -158,7 +158,6 @@ func (peer *Peer) Open(ctx context.Context, hs Handshake, b shared.Bitfield) err
 		func(piece, begin, block int) {
 			peer.sendRequest(piece, begin, block)
 		},
-		peer.log,
 	)
 
 	var chokeDeadlineFn *time.Timer

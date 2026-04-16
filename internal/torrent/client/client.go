@@ -17,20 +17,15 @@ var ErrNoPeers = errors.New("failed to assign pieces: 0 peers")
 var ErrFailedAssignment = errors.New("failed to assign pieces: no peers can accept the pieces")
 
 type Client struct {
-	ID        [20]byte
-	Port      uint16
-	Bitfield  shared.Bitfield
-	writer    *peer.PieceWriter
-	announcer *tracker.Announcer
-	info      *torrent.TorrentInfo
-	log       *logger.Log
-	// active peers which passed the handshake
-	peerCh    chan tracker.PeerAddress
-	scheduler *Scheduler
-	// assigned             map[int]*peer.Peer
-	// peers                []*peer.Peer
-	// unassigned           map[int]struct{}
-	// mu                   sync.Mutex
+	ID                   [20]byte
+	Port                 uint16
+	Bitfield             shared.Bitfield
+	writer               *peer.PieceWriter
+	announcer            *tracker.Announcer
+	info                 *torrent.TorrentInfo
+	log                  *logger.Log
+	peerCh               chan tracker.PeerAddress
+	scheduler            *Scheduler
 	maxGlobalConnections int
 	maxConnectedPeers    int
 	maxHalfOpen          int
@@ -107,7 +102,6 @@ func (c *Client) collectResults(results <-chan peer.Result) {
 			// increment the number of downloaded
 			// c.announcer.IncDownloaded(uint64(result.LenBlock))
 			// update bitfield
-
 			c.Bitfield.SetPiece(result.Index)
 
 			// assign new pieces to peer

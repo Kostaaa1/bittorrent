@@ -40,12 +40,16 @@ func newScheduler(pieces [][20]byte) *Scheduler {
 	for index := range pieces {
 		unassigned[index] = struct{}{}
 	}
+
 	return &Scheduler{
 		events:     make(chan Event),
 		assigned:   make(map[int]string),
 		unassigned: unassigned,
 		peers:      make(map[string]peerState, 0),
 	}
+}
+
+func (s *Scheduler) Close(ctx context.Context) {
 }
 
 func (s *Scheduler) Run(ctx context.Context) {
@@ -60,10 +64,11 @@ func (s *Scheduler) Run(ctx context.Context) {
 			case PeerDisonnected:
 				s.removePeer(ev.Addr)
 			case UnassignPiece:
-
+				s.unassign(ev.Pieces[0])
 			case UnassignPieces:
-
+				s.unassignPeerPieces(ev.Addr)
 			case AssignPieces:
+				s.assign(ev)
 			}
 		}
 	}
@@ -78,18 +83,18 @@ func (s *Scheduler) unassignPeerPieces(addr string) {
 	copied := s.assigned
 	for piece, peerAddr := range copied {
 		if peerAddr == addr {
-			delete(s.assigned, piece)
-			s.unassigned[piece] = struct{}{}
+			s.unassign(piece)
 		}
 	}
 }
 
+// make piece available again, so it can be assigned to the peer
 func (s *Scheduler) unassign(piece int) {
 	delete(s.assigned, piece)
 	s.unassigned[piece] = struct{}{}
 }
 
-func (c *Scheduler) assign(evMsg Event) {
+func (s *Scheduler) assign(evMsg Event) {
 	// if target == nil {
 	// 	panic("target peer cannot be nil")
 	// }
@@ -108,7 +113,7 @@ func (c *Scheduler) assign(evMsg Event) {
 	pieces := make([]int, 0, cap)
 	n := 0
 
-	unassigned := c.unassigned
+	unassigned := s.unassigned
 	// c.log.Assignment("target is assignable",
 	// 	"target", target.Addr,
 	// 	"pieces", target.Assigned(),
@@ -116,7 +121,7 @@ func (c *Scheduler) assign(evMsg Event) {
 	// 	"unassigned", len(c.unassigned),
 	// )
 
-	peer := c.peers[evMsg.Addr]
+	peer := s.peers[evMsg.Addr]
 
 	if len(unassigned) > 0 {
 		for piece := range unassigned {
@@ -143,8 +148,8 @@ func (c *Scheduler) assign(evMsg Event) {
 		// target.Assign(pieces)
 		for _, piece := range pieces {
 			// c.assign(target, piece)
-			delete(c.unassigned, piece)
-			c.assigned[piece] = evMsg.Addr
+			delete(s.unassigned, piece)
+			s.assigned[piece] = evMsg.Addr
 		}
 	}
 }

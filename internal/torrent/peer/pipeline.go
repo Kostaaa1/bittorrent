@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	logger "github.com/Kostaaa1/bittorrent/internal/log"
 	"github.com/Kostaaa1/bittorrent/internal/torrent"
 )
 
@@ -27,7 +26,6 @@ type pipeline struct {
 	hasActive    bool
 	onDispatch   func(piece, begin, block int)
 	peerAddr     string
-	log          *logger.Log
 }
 
 func newPipeline(
@@ -36,7 +34,6 @@ func newPipeline(
 	maxAssigned int,
 	info *torrent.TorrentInfo,
 	fn func(piece, begin, block int),
-	log *logger.Log,
 ) *pipeline {
 	return &pipeline{
 		peerAddr:    peerAddr,
@@ -48,7 +45,6 @@ func newPipeline(
 		hasActive:   false,
 		info:        info,
 		onDispatch:  fn,
-		log:         log,
 	}
 }
 
