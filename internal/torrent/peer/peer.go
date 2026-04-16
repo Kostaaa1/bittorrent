@@ -10,26 +10,13 @@ import (
 
 	logger "github.com/Kostaaa1/bittorrent/internal/log"
 	"github.com/Kostaaa1/bittorrent/internal/torrent"
+	"github.com/Kostaaa1/bittorrent/internal/torrent/shared"
 )
-
-type Bitfield []byte
-
-func (b Bitfield) HasPiece(index int) bool {
-	byteIndex := index / 8
-	offset := index % 8
-	return b[byteIndex]>>(7-offset)&1 == 1
-}
-
-func (b Bitfield) SetPiece(index int) {
-	byteIndex := index / 8
-	offset := index % 8
-	b[byteIndex] |= 1 << (7 - offset)
-}
 
 type Peer struct {
 	Addr           string
 	conn           net.Conn
-	bitfield       Bitfield
+	bitfield       shared.Bitfield
 	amChoking      bool
 	amInterested   bool
 	peerChoking    bool
@@ -38,12 +25,13 @@ type Peer struct {
 	info           *torrent.TorrentInfo
 	log            *logger.Log
 	pipeline       *pipeline
+
 	// add peer to peer pool
-	OnHandshake func()
+	// OnHandshake func()
 	// all pieces that needs to be reassigned
-	OnReassign func(pieces []int)
+	// OnReassign func(pieces []int)
 	// signal scheduler that we can accept pieces from it
-	OnScehdulePieces func()
+	// OnScehdulePieces func()
 	// peer has no pieces, e
 	// OnMissingPiece func()
 }
@@ -118,6 +106,10 @@ func (peer *Peer) Capacity() int {
 	return peer.pipeline.Capacity()
 }
 
+func (peer *Peer) canRequest() bool {
+	return peer.amInterested && !peer.peerChoking
+}
+
 func (peer *Peer) CanAssignPiece(piece int) bool {
 	if !peer.canRequest() {
 		return false
@@ -126,10 +118,6 @@ func (peer *Peer) CanAssignPiece(piece int) bool {
 		return false
 	}
 	return true
-}
-
-func (peer *Peer) canRequest() bool {
-	return peer.amInterested && !peer.peerChoking
 }
 
 func (peer *Peer) hasPiece(piece int) bool {
@@ -143,7 +131,7 @@ func (peer *Peer) Close() error {
 	return peer.conn.Close()
 }
 
-func (peer *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
+func (peer *Peer) Open(ctx context.Context, hs Handshake, b shared.Bitfield) error {
 	defer peer.conn.Close()
 
 	if err := peer.initiateHandshake(hs); err != nil {
@@ -154,16 +142,11 @@ func (peer *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 
 	peer.log.Traffic("[HANDSHAKE]", "status", "success", "peer", peer.Addr)
 
-	if peer.OnHandshake != nil {
-		peer.OnHandshake()
-	}
-
-	if err := peer.conn.SetDeadline(time.Now().Add(time.Minute)); err != nil {
-		return fmt.Errorf("failed to set deadline: %v", err)
-	}
+	// if peer.OnHandshake != nil {
+	// 	peer.OnHandshake()
+	// }
 
 	// TODO: add keepalive
-
 	peer.sendBitfield(b)
 	peer.sendInterested()
 
@@ -217,7 +200,7 @@ func (peer *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 						// "pending", peer.pipeline.pending,
 						"active", peer.pipeline.active,
 					)
-					peer.OnReassign(pieces)
+					// peer.OnReassign(pieces)
 				})
 			case MsgUnchoke:
 				peer.peerChoking = false
@@ -235,12 +218,11 @@ func (peer *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 					"active", peer.pipeline.active,
 				)
 
-				peer.OnScehdulePieces()
-
+				// peer.OnScehdulePieces()
 				if peer.canRequest() {
 					if err := peer.pipeline.Dispatch(); err != nil {
 						if errors.Is(err, ErrFailedToAssignNext) {
-							peer.OnScehdulePieces()
+							// peer.OnScehdulePieces()
 						}
 					}
 				}
@@ -257,7 +239,7 @@ func (peer *Peer) Open(ctx context.Context, hs Handshake, b Bitfield) error {
 				if peer.canRequest() {
 					if err := peer.pipeline.Dispatch(); err != nil {
 						if errors.Is(err, ErrFailedToAssignNext) {
-							peer.OnScehdulePieces()
+							// peer.OnScehdulePieces()
 						}
 					}
 				}

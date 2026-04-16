@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"log"
-	"net/http"
 	_ "net/http/pprof"
 	"os"
 
@@ -21,12 +20,6 @@ func getClientID() ([20]byte, error) {
 		return buf, err
 	}
 	return buf, nil
-}
-
-func init() {
-	go func() {
-		http.ListenAndServe("localhost:6060", nil)
-	}()
 }
 
 func main() {
@@ -48,23 +41,14 @@ func main() {
 	}
 	var port uint16 = 6881
 
-	NumBlocksPerPiece := tf.PieceLength / peer.MaxBlockSize
-
 	info := &torrent.TorrentInfo{
 		InfoHash:          tf.InfoHash,
 		NumOfPieces:       len(tf.Pieces),
 		TotalLength:       tf.TotalLength,
 		PieceLength:       tf.PieceLength,
 		BlockSize:         peer.MaxBlockSize,
-		NumBlocksPerPiece: NumBlocksPerPiece,
+		NumBlocksPerPiece: tf.PieceLength / peer.MaxBlockSize,
 	}
-
-	// w, err := os.OpenFile("traffic.log", os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-	w := os.Stdout
-	log := logger.New(w)
 
 	c := client.New(clientID,
 		port,
@@ -73,7 +57,7 @@ func main() {
 		tf.Files,
 		tf.Announce,
 		tf.AnnounceList,
-		log,
+		logger.New(os.Stdout),
 	)
 
 	c.Run(context.Background())
