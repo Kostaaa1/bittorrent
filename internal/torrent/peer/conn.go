@@ -18,34 +18,41 @@ func (p *Peer) sendChoke() {
 	p.amChoking = true
 	p.writeMsg(Message{ID: MsgChoke})
 }
+
 func (p *Peer) sendUnchoke() {
 	p.amChoking = false
 	p.writeMsg(Message{ID: MsgUnchoke})
 }
+
 func (p *Peer) sendInterested() {
 	p.amInterested = true
 	p.writeMsg(Message{ID: MsgInterested})
 }
+
 func (p *Peer) sendUninterested() {
 	p.amInterested = false
 	p.writeMsg(Message{ID: MsgUninterested})
 }
+
 func (p *Peer) sendKeepAlive() {
 	p.writeMsg(Message{})
 }
+
 func (p *Peer) sendBitfield(bf shared.Bitfield) {
 	p.writeMsg(Message{ID: MsgBitfield, Payload: bf})
 }
+
 func (p *Peer) SendHave(pieceID int) error {
 	payload := make([]byte, 4)
 	binary.BigEndian.PutUint32(payload, uint32(pieceID))
 	return p.writeMsg(Message{ID: MsgHave, Payload: payload})
 }
+
 func (p *Peer) sendRequest(index, begin, block int) error {
 	p.log.Traffic("[SEND - REQUEST]",
 		"piece", index,
 		"begin", begin,
-		"peer", p.Addr,
+		"peer", p.addr,
 	)
 	msg := make([]byte, 12)
 	binary.BigEndian.PutUint32(msg[:4], uint32(index))
@@ -58,7 +65,7 @@ func (p *Peer) sendCancel(index, begin, block int) error {
 	p.log.Traffic("[SEND - CANCEL]",
 		"piece", index,
 		"begin", begin,
-		"peer", p.Addr,
+		"peer", p.addr,
 	)
 	msg := make([]byte, 12)
 	binary.BigEndian.PutUint32(msg[:4], uint32(index))

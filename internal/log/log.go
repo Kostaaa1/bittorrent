@@ -11,13 +11,25 @@ type Log struct {
 }
 
 const (
-	levelAssign  slog.Level = 2
-	levelWrite   slog.Level = 4
-	levelTraffic slog.Level = 6
+	levelSched    slog.Level = 1
+	levelAssign   slog.Level = 2
+	levelPipeline slog.Level = 3
+	levelWrite    slog.Level = 4
+	levelTraffic  slog.Level = 6
 )
 
 func (l *Log) Traffic(msg string, args ...any) {
 	l.Log(context.Background(), levelTraffic, msg, args...)
+}
+
+// Sched logs scheduler-side events: piece pool state, peer registry, assignments.
+func (l *Log) Sched(msg string, args ...any) {
+	l.Log(context.Background(), levelSched, msg, args...)
+}
+
+// Pipe logs per-peer pipeline state: active piece, block window, in-flight requests.
+func (l *Log) Pipe(msg string, args ...any) {
+	l.Log(context.Background(), levelPipeline, msg, args...)
 }
 
 func (l *Log) Assignment(msg string, args ...any) {
@@ -35,8 +47,12 @@ func New(w io.Writer) *Log {
 			if a.Key == slog.LevelKey {
 				level := a.Value.Any().(slog.Level)
 				switch level {
+				case levelSched:
+					a.Value = slog.StringValue("SCHED")
 				case levelAssign:
 					a.Value = slog.StringValue("ASSIGNMENT")
+				case levelPipeline:
+					a.Value = slog.StringValue("PIPELINE")
 				case levelWrite:
 					a.Value = slog.StringValue("WRITE")
 				case levelTraffic:
